@@ -79,6 +79,8 @@ class Session:
     cwd: str | None
     updated: float
     parent: bool = False
+    parent_id: str | None = None
+    history_start_ordinal: int | None = None
 
 
 @dataclass
@@ -160,6 +162,8 @@ def identify_jsonl(records):
 def jsonl_session(path, source, records=None):
     if records is None:
         records = jsonl_header(path)
+    parent_id = None
+    history_start = None
     if source == "codex":
         meta = next(
             (obj(r.get("payload")) for r in records if r.get("type") == "session_meta"),
@@ -168,7 +172,13 @@ def jsonl_session(path, source, records=None):
         sid = meta.get("id") or meta.get("session_id")
         cwd = meta.get("cwd")
         origin = meta.get("source")
-        child = isinstance(origin, dict) and "subagent" in origin
+        child_source = obj(origin).get("subagent")
+        thread_spawn = obj(obj(child_source).get("thread_spawn"))
+        parent_id = meta.get("parent_thread_id") or thread_spawn.get("parent_thread_id")
+        child = child_source is not None or bool(parent_id)
+        ordinal = meta.get("subagent_history_start_ordinal")
+        if type(ordinal) is int and ordinal >= 0:
+            history_start = ordinal
     elif source == "claude":
         sid = next(
             (
@@ -185,6 +195,8 @@ def jsonl_session(path, source, records=None):
         child = "subagents" in path.parts or bool(first_message.get("isSidechain"))
         if "subagents" in path.parts:
             sid = path.stem
+            if path.parent.name == "subagents":
+                parent_id = path.parent.parent.name
     else:
         sid = next(
             (
@@ -196,7 +208,9 @@ def jsonl_session(path, source, records=None):
         )
         cwd = None
         child = False
-    return Session(source, path, sid or path.stem, cwd, 0, child)
+    return Session(
+        source, path, sid or path.stem, cwd, 0, child, parent_id, history_start
+    )
 
 
 def open_db(path):
@@ -270,7 +284,7 @@ def explicit_sessions(path, source, sid):
     return candidates
 
 
-def discover(source, project, sid):
+def discover(source, project, sid, *, read_updated=True):
     home = Path.home()
     codex_home = Path(os.environ.get("CODEX_HOME") or home / ".codex").expanduser()
     claude_home = Path(
@@ -301,7 +315,8 @@ def discover(source, project, sid):
                     continue
                 if project is not None and not project_matches(project, session.cwd):
                     continue
-                session.updated = jsonl_recent(path, records)
+                if read_updated:
+                    session.updated = jsonl_recent(path, records)
                 candidates.append(session)
             except OSError:
                 inaccessible += 1
@@ -1328,7 +1343,47 @@ def opencode_jsonl(trace, records):
             )
 
 
-def read_trace(session, inaccessible):
+def codex_record_key(record):
+    kind = record.get("type")
+    payload = obj(record.get("payload"))
+    subtype = payload.get("type")
+    if kind == "response_item":
+        key = payload.get("id") or payload.get("call_id")
+    elif kind == "token_usage_record":
+        key = payload.get("response_id")
+    elif kind == "turn_context" or (
+        kind == "event_msg"
+        and subtype in ("task_started", "task_complete", "turn_aborted")
+    ):
+        key = payload.get("turn_id")
+    elif kind == "event_msg" and subtype == "item_completed":
+        item = obj(payload.get("item"))
+        key = item.get("id")
+        subtype = (subtype, item.get("type"))
+    else:
+        return None
+    return (kind, subtype, key) if isinstance(key, str) and key else None
+
+
+def own_codex_records(session, records, inherited, warnings):
+    for line, record in records:
+        ordinal = record.get("ordinal")
+        if (
+            session.history_start_ordinal is not None
+            and type(ordinal) is int
+            and ordinal < session.history_start_ordinal
+        ) or codex_record_key(record) in inherited:
+            warnings["inherited_records_skipped"] += 1
+            continue
+        payload = obj(record.get("payload"))
+        if record.get("type") == "token_usage_record" and payload.get(
+            "thread_id"
+        ) not in (None, session.id):
+            continue
+        yield line, record
+
+
+def read_trace(session, inaccessible, *, inherited=None):
     trace = Trace(session)
     if inaccessible:
         trace.warnings["inaccessible_sources"] = inaccessible
@@ -1348,12 +1403,212 @@ def read_trace(session, inaccessible):
             "opencode": opencode_jsonl,
         }
         with session.path.open(encoding="utf-8", errors="replace") as stream:
-            handlers[session.source](trace, jsonl_records(stream, trace.warnings))
+            records = jsonl_records(stream, trace.warnings)
+            if inherited is not None and session.source == "codex":
+                trace.snapshots["own_usage"] = True
+                records = own_codex_records(session, records, inherited, trace.warnings)
+            handlers[session.source](trace, records)
     if not trace.events:
         raise EmptyTrace(
             f"指定セッション {session.id} には表示できるイベントがありません"
         )
     return trace
+
+
+def subagent_sessions(root, unavailable):
+    if root.source == "claude":
+        parent_path = (
+            root.path.parent.parent
+            if root.path.parent.name == "subagents"
+            else root.path.with_suffix("")
+        )
+        paths = (parent_path / "subagents").glob("agent-*.jsonl")
+        sessions = []
+        for path in sorted(paths):
+            if not path.is_symlink() and path.is_file():
+                try:
+                    sessions.append(jsonl_session(path, "claude"))
+                except OSError:
+                    unavailable.add(path.stem)
+        return sessions
+    sessions, _ = discover("codex", None, None, read_updated=False)
+    known_paths = {session.path for session in sessions}
+    for path in root.path.parent.glob("*.jsonl"):
+        if path in known_paths or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            records = jsonl_header(path)
+        except OSError:
+            continue
+        if identify_jsonl(records) == "codex":
+            sessions.append(jsonl_session(path, "codex", records))
+    return sessions
+
+
+def codex_history_keys(path):
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        return {
+            key
+            for _, record in jsonl_records(stream)
+            if (key := codex_record_key(record)) is not None
+        }
+
+
+def collect_subagent_traces(root, input_paths=None):
+    source = root.session.source
+    if input_paths is None:
+        input_paths = set()
+    unavailable = set()
+    unavailable_history = set()
+    catalog = subagent_sessions(root.session, unavailable)
+    by_id = defaultdict(list)
+    by_parent = defaultdict(set)
+    for session in catalog:
+        by_id[session.id].append(session)
+        if session.parent_id:
+            by_parent[session.parent_id].add(session.id)
+    if source == "codex" and root.session.parent:
+        inherited = set()
+        ancestor = root.session.parent_id
+        visited = {root.session.id}
+        while ancestor and ancestor not in visited and len(by_id[ancestor]) == 1:
+            visited.add(ancestor)
+            session = by_id[ancestor][0]
+            input_paths.add(session.path.resolve())
+            try:
+                inherited.update(codex_history_keys(session.path))
+            except OSError:
+                unavailable_history.add(session.id)
+            ancestor = session.parent_id
+        original_warnings = root.warnings
+        root = read_trace(root.session, 0, inherited=inherited)
+        for key in ("empty_sessions_skipped", "inaccessible_sources"):
+            if original_warnings.get(key):
+                root.warnings[key] = original_warnings[key]
+    else:
+        inherited = set()
+
+    entries = [(root, None, "親セッション")]
+    histories = [inherited]
+    seen = {root.session.id}
+
+    def load_child(session_id, parent_index, label):
+        if session_id in seen:
+            return
+        candidates = by_id[session_id]
+        if len(candidates) != 1:
+            unavailable.add(session_id)
+            return
+        session = candidates[0]
+        if source == "codex" and session.parent_id not in (
+            None,
+            entries[parent_index][0].session.id,
+        ):
+            return
+        inherited = histories[parent_index] if source == "codex" else None
+        input_paths.add(session.path.resolve())
+        try:
+            trace = read_trace(session, 0, inherited=inherited)
+        except (OSError, EmptyTrace):
+            unavailable.add(session_id)
+            return
+        seen.add(session_id)
+        entries.append((trace, parent_index, label or session_id))
+        histories.append(inherited)
+
+    index = 0
+    while True:
+        while index < len(entries):
+            trace = entries[index][0]
+            pair_tools(trace)
+            if source == "codex":
+                try:
+                    histories[index] = histories[index] | codex_history_keys(
+                        trace.session.path
+                    )
+                except OSError:
+                    unavailable_history.add(trace.session.id)
+            for event in trace.events:
+                agent = event.get("agent_activity") or {}
+                identifier = agent.get("id")
+                if not isinstance(identifier, str) or not identifier:
+                    continue
+                if source == "claude":
+                    identifier = "agent-" + identifier
+                else:
+                    candidates = by_id.get(identifier, [])
+                    if candidates and not any(
+                        child.parent and child.parent_id in (None, trace.session.id)
+                        for child in candidates
+                    ):
+                        continue
+                    if not candidates and agent.get("status") not in (
+                        "started",
+                        "completed",
+                    ):
+                        continue
+                load_child(
+                    identifier,
+                    index,
+                    agent.get("name") or agent.get("type"),
+                )
+            if source == "codex":
+                for identifier in sorted(by_parent[trace.session.id]):
+                    load_child(identifier, index, None)
+            index += 1
+        if source != "claude" or root.session.parent:
+            break
+        remaining = sorted(set(by_id) - seen - unavailable)
+        if not remaining:
+            break
+        load_child(remaining[0], 0, None)
+    if unavailable:
+        root.warnings["subagents_unavailable"] += len(unavailable)
+    if unavailable_history:
+        root.warnings["inherited_history_unavailable"] += len(unavailable_history)
+    return entries
+
+
+def session_info(session):
+    return {
+        "source": session.source,
+        "agent": AGENTS[session.source],
+        "id": session.id,
+        "cwd": session.cwd,
+        "path": str(session.path),
+    }
+
+
+def combine_subagent_traces(entries):
+    combined = Trace(entries[0][0].session)
+    sessions = []
+    for index, (trace, parent_index, label) in enumerate(entries):
+        observed = [event for event in trace.events if not event.get("combined")]
+        sessions.append(
+            {
+                **session_info(trace.session),
+                "label": label,
+                "parent_index": parent_index,
+                "token_summary": token_summary(trace, observed),
+                "cost_summary": cost_summary(trace, observed),
+            }
+        )
+        combined.warnings.update(
+            {
+                key: combined.warnings[key] + value
+                for key, value in trace.warnings.items()
+            }
+        )
+        offset = len(combined.events)
+        for event in trace.events:
+            merged = {**event, "id": event["id"] + offset, "session_index": index}
+            if event.get("turn") is not None:
+                merged["turn"] = (index, event["turn"])
+            for link in ("tool_id", "result_id"):
+                if event.get(link) is not None:
+                    merged[link] = event[link] + offset
+            combined.events.append(merged)
+    return combined, sessions
 
 
 def pair_tools(trace):
@@ -1451,7 +1706,7 @@ def token_summary(trace, observed):
     for event in observed:
         for key, value in event.get("tokens", {}).items():
             totals[key] += value
-    if "tokens" in trace.snapshots:
+    if "tokens" in trace.snapshots and not trace.snapshots.get("own_usage"):
         tokens, ref = trace.snapshots["tokens"]
         return {"values": tokens, "basis": "Codex CLI · 最新の累積値", "ref": ref}
     bases = {
@@ -1459,6 +1714,8 @@ def token_summary(trace, observed):
         "codex": "Codex CLI · ログで確認できたリクエスト",
         "opencode": "OpenCode · ステップ単位（内訳がない応答はメッセージ単位）",
     }
+    if trace.snapshots.get("own_usage"):
+        bases["codex"] = "Codex CLI · 子セッション固有のリクエスト"
     return {"values": dict(totals), "basis": bases[trace.session.source]}
 
 
@@ -1616,13 +1873,7 @@ def diagnostic_report(trace):
         trace.warnings["unmatched_tool"] = len(uncovered)
 
     return {
-        "session": {
-            "source": session.source,
-            "agent": AGENTS[session.source],
-            "id": session.id,
-            "cwd": session.cwd,
-            "path": str(session.path),
-        },
+        "session": session_info(session),
         "range": {
             "start": start,
             "end": end,
@@ -1840,6 +2091,7 @@ PUBLIC_EVENT_FIELDS = {
     "stop_reason",
     "server",
     "status",
+    "session_index",
 }
 
 
@@ -2070,6 +2322,19 @@ def main():
         help="HTMLの出力先（既定値 trace.html）",
     )
     parser.add_argument("--diagnostics", metavar="PATH", help="追加分析用のJSON出力先")
+    subagents = parser.add_mutually_exclusive_group()
+    subagents.add_argument(
+        "--include-subagents",
+        action="store_true",
+        default=None,
+        help="Claude CodeとCodexの親・子セッションを同じ時間軸に表示（既定）",
+    )
+    subagents.add_argument(
+        "--no-include-subagents",
+        dest="include_subagents",
+        action="store_false",
+        help="選択したセッションだけを表示",
+    )
     visibility = parser.add_mutually_exclusive_group()
     visibility.add_argument(
         "--metadata-only",
@@ -2091,6 +2356,26 @@ def main():
     try:
         trace = select_trace(args)
         session = trace.session
+        input_paths = {session.path.resolve()}
+        sessions = []
+        supports_subagents = session.source in ("claude", "codex")
+        if args.include_subagents and not supports_subagents:
+            raise ValueError("子セッションの統合はClaude CodeとCodexに対応しています")
+        if supports_subagents and args.include_subagents is not False:
+            try:
+                entries = collect_subagent_traces(trace, input_paths)
+            except EmptyTrace:
+                # A selected Codex child may contain only inherited history.
+                if args.include_subagents:
+                    raise
+                pair_tools(trace)
+            else:
+                if len(entries) > 1 or args.include_subagents:
+                    trace, sessions = combine_subagent_traces(entries)
+                else:
+                    trace = entries[0][0]
+        else:
+            pair_tools(trace)
         output = Path(args.output).expanduser().resolve()
         diagnostics = (
             Path(args.diagnostics).expanduser().resolve() if args.diagnostics else None
@@ -2104,10 +2389,9 @@ def main():
             if session.path.suffix.lower() in DB_SUFFIXES
             else set()
         )
-        if len(set(paths)) != len(paths) or {
-            session.path.resolve(),
-            *sqlite_paths,
-        }.intersection(paths):
+        if len(set(paths)) != len(paths) or (input_paths | sqlite_paths).intersection(
+            paths
+        ):
             raise ValueError(
                 "出力先は入力ログと分け、HTMLと診断JSONには別のパスを指定してください"
             )
@@ -2116,8 +2400,13 @@ def main():
                 raise ValueError(
                     f"出力先に既存ディレクトリ内のファイルパスを指定してください: {path}"
                 )
-        pair_tools(trace)
         report = diagnostic_report(trace)
+        if sessions:
+            report.update(
+                sessions=sessions,
+                token_summary=sessions[0]["token_summary"],
+                cost_summary=sessions[0]["cost_summary"],
+            )
         rendered = render_html(
             report,
             public_events(
@@ -2145,6 +2434,12 @@ def main():
         print(f"[agent-trace] {limitation}")
     if skipped := trace.warnings.get("empty_sessions_skipped"):
         print(f"[agent-trace] 表示対象のないセッション {skipped} 件をスキップ")
+    if sessions:
+        print(f"[agent-trace] 子セッション {len(sessions) - 1} 件を統合")
+    if unavailable := trace.warnings.get("subagents_unavailable"):
+        print(
+            f"[agent-trace] 読み込めなかった、または識別できなかった子セッション {unavailable} 件"
+        )
     print(f"[agent-trace] HTML {output}")
     if diagnostics is not None:
         print(f"[agent-trace] JSON {diagnostics}")

@@ -2,12 +2,16 @@ import argparse
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from scripts.generate_trace import (
+    collect_subagent_traces,
+    combine_subagent_traces,
     diagnostic_events,
     diagnostic_report,
     pair_tools,
@@ -133,6 +137,190 @@ class TraceTests(unittest.TestCase):
         self.workspace = tempfile.TemporaryDirectory()
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
+
+    def generate_html_report(self, *options):
+        script = Path(__file__).resolve().parents[1] / "scripts" / "generate_trace.py"
+        output = self.root / "trace.html"
+        result = subprocess.run(
+            [sys.executable, str(script), *map(str, options), "--output", str(output)],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        html = output.read_text(encoding="utf-8")
+        return json.loads(
+            html.split('<script id="trace-data" type="application/json">', 1)[1].split(
+                "</script>", 1
+            )[0]
+        )
+
+    def test_codex_subagent_merge_uses_own_history_and_usage(self):
+        def record(ordinal, kind, **payload):
+            return {
+                "ordinal": ordinal,
+                "type": kind,
+                "timestamp": EPOCH + ordinal,
+                "payload": payload,
+            }
+
+        inherited = record(
+            1,
+            "response_item",
+            type="message",
+            role="user",
+            id="shared",
+            content=[{"text": "親だけの依頼"}],
+        )
+        root_path = write_jsonl(
+            self.root / "root.jsonl",
+            [
+                record(0, "session_meta", id="root"),
+                inherited,
+            ],
+        )
+        write_jsonl(
+            self.root / "bounded.jsonl",
+            [
+                record(
+                    0,
+                    "session_meta",
+                    id="bounded",
+                    parent_thread_id="root",
+                    subagent_history_start_ordinal=3,
+                ),
+                {**inherited, "timestamp": EPOCH + 2},
+                record(
+                    4,
+                    "response_item",
+                    type="message",
+                    role="assistant",
+                    id="own",
+                    content=[{"text": "境界の後"}],
+                ),
+                record(
+                    5,
+                    "token_usage_record",
+                    response_id="child-response",
+                    thread_id="bounded",
+                    usage={"total_tokens": 20},
+                    thread_token_usage={"total_tokens": 500},
+                ),
+            ],
+        )
+        write_jsonl(
+            self.root / "legacy.jsonl",
+            [
+                record(0, "session_meta", id="legacy", parent_thread_id="root"),
+                {**inherited, "timestamp": EPOCH + 3},
+                record(
+                    8,
+                    "response_item",
+                    type="message",
+                    role="assistant",
+                    id="legacy-own",
+                    content=[{"text": "古い形式の子"}],
+                ),
+            ],
+        )
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.root / "empty")}):
+            combined, sessions = combine_subagent_traces(
+                collect_subagent_traces(select_trace(args(file=root_path)))
+            )
+            default_report = self.generate_html_report("--file", root_path)
+            merged_report = self.generate_html_report(
+                "--file", root_path, "--include-subagents"
+            )
+            single_report = self.generate_html_report(
+                "--file", root_path, "--no-include-subagents"
+            )
+        self.assertEqual(default_report, merged_report)
+        self.assertEqual(default_report["sessions"], sessions)
+        self.assertNotIn("sessions", single_report)
+        self.assertEqual(
+            [e["message"] for e in single_report["events"] if "message" in e],
+            ["親だけの依頼"],
+        )
+        report = diagnostic_report(combined)
+        events = public_events(combined, False, messages=True)
+        self.assertEqual(
+            [session["id"] for session in sessions], ["root", "bounded", "legacy"]
+        )
+        self.assertEqual(
+            [session["parent_index"] for session in sessions], [None, 0, 0]
+        )
+        self.assertEqual(sessions[1]["token_summary"]["values"]["total"], 20)
+        self.assertEqual(
+            [e["message"] for e in events if "message" in e],
+            ["親だけの依頼", "境界の後", "古い形式の子"],
+        )
+        self.assertEqual(report["range"]["end"], EPOCH + 8)
+        self.assertEqual(len({e["id"] for e in events}), len(events))
+        self.assertEqual(events[-1]["session_index"], 2)
+        self.assertEqual(events[-1]["refs"], [{"line": 3}])
+
+    def test_claude_subagent_merge_keeps_tool_refs_and_nested_ownership(self):
+        def user(text, at):
+            return {
+                "type": "user",
+                "timestamp": EPOCH + at,
+                "sessionId": "parent",
+                "message": {"content": text},
+            }
+
+        def delegate(tool_id, agent_id, at):
+            return [
+                {
+                    "type": "assistant",
+                    "timestamp": EPOCH + at,
+                    "sessionId": "parent",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": "Agent",
+                                "input": {"description": agent_id},
+                            }
+                        ]
+                    },
+                },
+                {
+                    **user(
+                        [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_id,
+                                "content": "完了",
+                            }
+                        ],
+                        at + 1,
+                    ),
+                    "toolUseResult": {"agentId": agent_id, "status": "completed"},
+                },
+            ]
+
+        parent_path = write_jsonl(
+            self.root / "parent.jsonl", [user("親", 0), *delegate("one", "a", 1)]
+        )
+        children = self.root / "parent" / "subagents"
+        write_jsonl(
+            children / "agent-a.jsonl", [user("子", 1), *delegate("two", "b", 3)]
+        )
+        write_jsonl(children / "agent-b.jsonl", [user("孫", 9)])
+        combined, sessions = combine_subagent_traces(
+            collect_subagent_traces(select_trace(args(file=parent_path)))
+        )
+        self.assertEqual([owner["parent_index"] for owner in sessions], [None, 0, 1])
+        self.assertEqual(
+            self.generate_html_report("--file", parent_path)["sessions"], sessions
+        )
+        events = {event["id"]: event for event in combined.events}
+        for event in combined.events:
+            if "result_id" in event:
+                result = events[event["result_id"]]
+                self.assertEqual(result["session_index"], event["session_index"])
+                self.assertEqual(result["tool_id"], event["id"])
+        self.assertEqual(diagnostic_report(combined)["range"]["end"], EPOCH + 9)
 
     def test_claude_diagnostics_and_delegated_tool_result(self):
         def event(seconds, kind, **fields):
@@ -661,6 +849,9 @@ class TraceTests(unittest.TestCase):
                 ],
             )
         before = db.read_bytes()
+        report = self.generate_html_report("--file", db, "--session", "session")
+        self.assertEqual(report["session"]["source"], "opencode")
+        self.assertNotIn("sessions", report)
         for path in (export, db):
             with self.subTest(path=path.name):
                 trace, report = load(args(file=path, session="session"))
