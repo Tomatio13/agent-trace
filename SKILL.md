@@ -31,7 +31,7 @@ python3 "$SKILL_DIR/scripts/generate_trace.py" --file "$jsonl"
 python3 "$SKILL_DIR/scripts/generate_trace.py" --file "$opencode_db" --session "$session_id"
 ```
 
-`--open` は生成後に既定のブラウザで開く。既定のHTMLには、記録された対象ファイルのパス、作業ディレクトリ、実行コマンド、終了コード、失敗時の出力（最大で末尾6000文字）を含める。メタデータだけのHTMLを求められたら `--metadata-only` を指定する。本文やツール入出力のローカル閲覧をユーザーが求めた場合は `--include-content` をHTMLに使う。診断JSONには本文を含めない。
+`--open` は生成後に既定のブラウザで開く。既定のHTMLには会話本文と、記録された対象ファイルのパス、作業ディレクトリ、実行コマンド、終了コード、失敗時の出力（最大で末尾6000文字）が入る。会話の行では冒頭を表示し、詳細で全文を読める。メタデータだけのHTMLを求められたら `--metadata-only` を指定する。ツールの入力と出力まで含める場合は `--include-content` を使う。診断JSONには本文を含めない。
 
 ## ログを読み解く
 

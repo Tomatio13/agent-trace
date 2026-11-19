@@ -167,6 +167,11 @@ class TraceTests(unittest.TestCase):
         self.assertEqual((check["start"], check["end"]), (EPOCH + 3, EPOCH + 5))
         self.assertEqual(len(read["refs"]), 2)
         self.assertNotIn("BODY-DO-NOT-EXPORT", render_html(report, events, False))
+        messages = public_events(trace, False, messages=True)
+        user = next(event for event in messages if event["kind"] == "user")
+        self.assertEqual(user["message"], PRIVATE)
+        self.assertNotIn("content", user)
+        self.assertNotIn("</ScRiPt>", render_html(report, messages, False))
         self.assertNotIn(
             "BODY-DO-NOT-EXPORT", json.dumps(diagnostic_events(events, report))
         )

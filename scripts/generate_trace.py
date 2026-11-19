@@ -473,7 +473,16 @@ def claude_trace(trace, records):
             block_type = block.get("type")
             if block_type == "text":
                 label = "ユーザー入力" if kind == "user" else "応答"
-                trace.add(kind, label, at, ref, turn=turn, content=block.get("text"))
+                trace.add(
+                    kind,
+                    label,
+                    at,
+                    ref,
+                    turn=turn,
+                    content=block.get("text"),
+                    synthetic=bool(record.get("isMeta"))
+                    or (kind == "user" and bool(record.get("isSidechain"))),
+                )
             elif block_type == "thinking":
                 trace.add("reasoning", "推論イベント", at, ref, turn=turn)
             elif block_type == "tool_use":
@@ -644,6 +653,15 @@ def codex_trace(trace, records):
                     if isinstance(parts, list)
                     else parts
                 )
+                synthetic = (
+                    role == "user"
+                    and isinstance(content, str)
+                    and content.rstrip().endswith("</environment_context>")
+                    and content.startswith(
+                        ("# AGENTS.md instructions", "<environment_context>")
+                    )
+                    and not obj(record.get("metadata")).get("client_authored")
+                )
                 trace.add(
                     role,
                     "ユーザー入力" if role == "user" else "応答",
@@ -651,6 +669,7 @@ def codex_trace(trace, records):
                     ref,
                     turn=turn,
                     content=content,
+                    synthetic=synthetic,
                 )
                 response_messages.add(role)
             elif sub == "reasoning":
@@ -793,6 +812,7 @@ def opencode_messages(trace, messages):
                     part_ref,
                     turn=turn,
                     content=part.get("text"),
+                    synthetic=bool(part.get("synthetic")),
                 )
             elif part_type == "reasoning":
                 timing = obj(part.get("time"))
@@ -1300,6 +1320,8 @@ def command_action(command):
 
 def action_name(event):
     kind = event["kind"]
+    if kind == "user" and event.get("synthetic"):
+        return "セッションの補足情報を受信"
     if kind == "command":
         return command_action(event.get("command")) or "シェルコマンドを実行"
     if kind == "tool":
@@ -1388,35 +1410,38 @@ def operation_details(event):
     return {key: value for key, value in details.items() if value}
 
 
-def public_events(trace, include_content, *, operations=False):
+def public_events(trace, include_content, *, operations=False, messages=False):
     fields = (
         PUBLIC_EVENT_FIELDS | {"content", "command", "output"}
         if include_content
         else PUBLIC_EVENT_FIELDS
     )
-    return [
-        {
-            **{
-                key: value
-                for key, value in event.items()
-                if key in fields and value is not None
-            },
-            "action": action_name(event),
-            **(
-                {"token_count": token_count}
-                if (token_count := event_token_count(trace.session.source, event))
-                is not None
-                else {}
-            ),
-            **(
-                {"operation": details}
-                if operations and (details := operation_details(event))
-                else {}
-            ),
+    events = []
+    for event in trace.events:
+        if event.get("combined"):
+            continue
+        public = {
+            key: value
+            for key, value in event.items()
+            if key in fields and value is not None
         }
-        for event in trace.events
-        if not event.get("combined")
-    ]
+        public["action"] = action_name(event)
+        if (count := event_token_count(trace.session.source, event)) is not None:
+            public["token_count"] = count
+        if operations and (details := operation_details(event)):
+            public["operation"] = details
+        content = event.get("content")
+        if (
+            (messages or include_content)
+            and event["kind"] in ("user", "assistant")
+            and not event.get("synthetic")
+            and isinstance(content, str)
+            and content.strip()
+        ):
+            public["message"] = content
+            public.pop("content", None)
+        events.append(public)
+    return events
 
 
 def diagnostic_events(events, report):
@@ -1488,7 +1513,7 @@ def main():
     visibility.add_argument(
         "--metadata-only",
         action="store_true",
-        help="HTMLからコマンド、対象パス、失敗出力を省く",
+        help="HTMLから会話本文、コマンド、対象パス、失敗出力を省く",
     )
     visibility.add_argument(
         "--include-content",
@@ -1535,7 +1560,10 @@ def main():
         rendered = render_html(
             report,
             public_events(
-                trace, args.include_content, operations=not args.metadata_only
+                trace,
+                args.include_content,
+                operations=not args.metadata_only,
+                messages=not args.metadata_only,
             ),
             args.include_content,
         )
