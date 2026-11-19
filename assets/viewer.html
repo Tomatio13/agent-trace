@@ -6,135 +6,372 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>Agent Trace — __TRACE_TITLE__</title>
 <style>
+__DOCUMENT_CSS__
+</style>
+<style>
 :root {
-  color-scheme: dark;
-  --bg: #101519;
-  --surface: #171e23;
-  --raised: #1e272e;
-  --line: #303c45;
-  --text: #e8eff4;
-  --muted: #a4b3bf;
-  --focus: #92d7fc;
-  --tool: #5bc8b0;
-  --model: #87aef5;
-  --error: #ff988b;
-  --marker: #a7bac8;
-  --label-width: 215px;
-  font: 14px/1.5 system-ui, sans-serif;
+  color-scheme: light;
+  --trace-label-width: clamp(225px, 30vw, 410px);
+  --trace-tool: var(--mb-ink-body);
+  --trace-model: var(--mb-link);
+  --trace-conversation: var(--mb-muted);
+  --trace-error: var(--mb-accent);
 }
-*, *::before, *::after { box-sizing: border-box; }
-body { margin: 0; color: var(--text); background: var(--bg); }
+
+@media screen {
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --mb-bg: #15171A;
+    --mb-surface: #202327;
+    --mb-ink: #F3F4F6;
+    --mb-ink-body: #E2E5E9;
+    --mb-border: #777F89;
+    --mb-rule: #41464E;
+    --mb-muted: #B4BDC8;
+    --mb-faint: #929CA8;
+    --mb-link: #79BFFC;
+    --mb-accent: #FF8D81;
+  }
+}
+
+.mb-page.trace-page {
+  max-width: 1520px;
+  padding: 32px clamp(16px, 4vw, 48px) 40px;
+}
+
+.trace-page .mb-header {
+  position: relative;
+  align-items: center;
+  gap: 12px 24px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.session-info {
+  max-width: 100%;
+}
+
+.session-info > summary {
+  padding: 4px 12px;
+  background: var(--mb-surface);
+  border: var(--mb-border-w) solid var(--mb-border);
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.session-panel.mb-card {
+  position: absolute;
+  z-index: 3;
+  inset-inline-end: 0;
+  top: 100%;
+  width: min(42rem, 100%);
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.session-panel p {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.trace-card.mb-card { padding: 0; margin: 0; }
+.timeline-head { padding: 20px 24px 12px; }
+.timeline-head h2 { margin: 0 0 6px; }
+#overview-meta { margin: 0 0 12px; }
+
+.overview.mb-figure-frame {
+  padding: 8px 12px;
+  background: var(--mb-bg);
+  border: 1px solid var(--mb-rule);
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  align-items: center;
+  min-height: 22px;
+  font-size: 12px;
+  color: var(--mb-muted);
+}
+
+.rail {
+  position: relative;
+  height: 100%;
+  border-inline-end: 1px solid var(--mb-rule);
+  background: repeating-linear-gradient(to right, var(--mb-rule) 0 1px, transparent 1px 25%);
+}
+
+.rail i {
+  position: absolute;
+  top: 50%;
+  height: 6px;
+  border-radius: 2px;
+  transform: translateY(-50%);
+}
+
 button, select, input { font: inherit; color: inherit; }
+
 button, select, input[type="search"] {
-  border: 1px solid var(--line); border-radius: 6px; background: var(--raised); padding: 6px 10px;
+  padding: 5px 9px;
+  border: 1px solid var(--mb-border);
+  border-radius: 6px;
+  background: var(--mb-surface);
+  font-size: 13px;
+  line-height: 1.5;
 }
+
 button { cursor: pointer; text-align: left; }
-button:hover, button[aria-current="true"] { background: #283b47; }
+button:hover { background: var(--mb-bg); }
+button[aria-current="true"], #theme-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--mb-link) 10%, var(--mb-surface));
+}
+button[aria-current="true"] {
+  box-shadow: inset 3px 0 var(--mb-link);
+}
+#theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+#theme-toggle svg { width: 15px; height: 15px; }
 button:disabled { cursor: default; opacity: .45; }
-:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-header { padding: 22px clamp(16px, 4vw, 54px); border-bottom: 1px solid var(--line); background: var(--surface); }
-header h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: -.025em; }
-header p, .muted { color: var(--muted); }
-header p { margin: 5px 0 0; overflow-wrap: anywhere; }
-main { max-width: 1600px; margin: auto; padding: 20px clamp(12px, 3vw, 44px) 40px; }
-h2 { margin: 0; font-size: 17px; }
-h3 { margin: 0 0 7px; font-size: 14px; }
-p { margin: 6px 0; }
-.panel { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); min-width: 0; }
-.notice { color: var(--muted); overflow-wrap: anywhere; }
-.notice { margin: 10px 1px; font-size: 13px; }
-details { margin: 10px 0 14px; }
-summary { cursor: pointer; }
-.result-list { display: grid; gap: 4px; margin: 0 0 12px; }
-.result-list button { overflow-wrap: anywhere; }
-.workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(255px, 300px); gap: 12px; align-items: start; }
-.timeline-head { padding: 10px 12px; }
-.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; }
-.controls input[type="search"] { min-width: 0; width: 165px; }
-.controls output { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 2px 12px 9px; color: var(--muted); font-size: 12px; }
-.swatch { display: inline-block; width: 10px; height: 7px; border-radius: 2px; margin-right: 4px; background: var(--marker); }
-.swatch.tool { background: var(--tool); }
-.swatch.model { background: var(--model); }
-.swatch.error { background: var(--error); }
+:focus-visible { outline: 2px solid var(--mb-link); outline-offset: 2px; }
+
+.controls, .legend, .timeline-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.controls { margin-top: 12px; }
+.controls:empty { display: none; }
+.controls input[type="search"] { min-width: 0; width: min(175px, 100%); }
+
+.controls .icon-button {
+  display: grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  padding: 0;
+}
+
+.icon-button svg { width: 15px; height: 15px; }
+#analysis-limits { font-size: 13px; color: var(--mb-muted); }
+
+.legend, .timeline-foot {
+  padding: 8px 24px;
+  color: var(--mb-muted);
+  font-size: 12px;
+}
+
+.swatch {
+  display: inline-block;
+  width: 11px;
+  height: 7px;
+  border-radius: 2px;
+  margin-inline-end: 4px;
+  background: var(--trace-conversation);
+}
+
+.swatch.tool { background: var(--trace-tool); }
+.swatch.model { background: var(--trace-model); }
+.swatch.error { background: var(--trace-error); }
 .swatch.point { width: 7px; transform: rotate(45deg); }
-.scroll { overflow: auto; max-height: 62vh; border-top: 1px solid var(--line); }
-.chart { min-width: 460px; }
-.axis, .row { display: grid; grid-template-columns: var(--label-width) minmax(0, 1fr); width: 100%; }
-.axis { position: sticky; top: 0; z-index: 2; background: var(--raised); border-bottom: 1px solid var(--line); min-height: 31px; }
-.axis > span { padding: 5px 10px; }
-.axis-track { margin: 0 15px 0 9px; position: relative; }
-.tick { position: absolute; top: 5px; transform: translateX(-50%); white-space: nowrap; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.scroll { overflow: auto; max-height: 58vh; border-block: 1px solid var(--mb-rule); }
+
+.axis, .row {
+  display: grid;
+  grid-template-columns: var(--trace-label-width) minmax(0, 1fr);
+  width: 100%;
+}
+
+.axis {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 33px;
+  background: var(--mb-bg);
+  border-bottom: 1px solid var(--mb-border);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.axis > span { padding: 5px 12px; }
+.axis-track, .track { margin: 0 15px 0 9px; position: relative; }
+.tick {
+  position: absolute;
+  top: 6px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.tick, .row-time, .row-tokens, #range {
+  color: var(--mb-muted);
+  font-family: var(--mb-font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
 .tick:first-child { transform: none; }
 .tick:last-child:not(:first-child) { transform: translateX(-100%); }
-.row { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 0; min-height: 35px; }
+
+.row {
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--mb-rule);
+}
+.row:last-child { border-bottom: 0; }
 .row:focus-visible { outline-offset: -2px; }
-.row-label { display: flex; align-items: center; gap: 5px; padding: 5px 7px 5px 10px; min-width: 0; border-right: 1px solid var(--line); }
+
+.row-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 12px;
+  min-width: 0;
+  border-inline-end: 1px solid var(--mb-rule);
+}
+
+.row-description { min-width: 0; display: grid; }
 .row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-time { margin-left: auto; flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.track { display: block; position: relative; margin: 0 15px 0 9px; }
-.gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); pointer-events: none; }
-.mark { position: absolute; top: 50%; transform: translateY(-50%); height: 10px; min-width: 2px; border-radius: 3px; background: var(--marker); }
-.mark[data-kind="tool"], .mark[data-kind="command"] { background: var(--tool); }
-.mark[data-kind="model"], .mark[data-kind="reasoning"] { background: var(--model); }
-.mark[data-kind="turn"] { background: transparent; border: 1px solid var(--marker); }
-.mark[data-failed="true"] { background: var(--error); }
+.row-metrics { display: grid; margin-inline-start: auto; flex: none; text-align: end; }
+.row-tokens { white-space: nowrap; }
+.row-tokens.maximum { font-weight: 700; }
+.row-note { font-size: 12px; color: var(--mb-muted); overflow-wrap: anywhere; }
+
+.track { display: block; }
+.gridline { position: absolute; inset-block: 0; border-left: 1px solid var(--mb-rule); pointer-events: none; }
+
+.mark {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 9px;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--trace-conversation);
+}
+
+.mark[data-kind="tool"], .mark[data-kind="command"] { background: var(--trace-tool); }
+.mark[data-kind="model"], .mark[data-kind="reasoning"] { background: var(--trace-model); }
+.mark[data-kind="turn"] { background: transparent; border: 1px solid var(--trace-conversation); }
+.mark[data-failed="true"] { background: var(--trace-error); }
 .mark.point { height: 7px; width: 7px; border-radius: 1px; transform: translate(-50%, -50%) rotate(45deg); }
-.mark[data-zero="true"] { min-width: 2px; }
-.timeline-foot { padding: 8px 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.untimed { padding: 0 12px; }
-.inspector { padding: 12px 14px; overflow-wrap: anywhere; position: sticky; top: 10px; }
-.inspector dl { margin: 10px 0 0; }
-.inspector dt { color: var(--muted); font-size: 12px; }
-.inspector dd { margin: 0 0 8px; font-variant-numeric: tabular-nums; }
-pre { padding: 9px; background: var(--bg); border-radius: 5px; white-space: pre-wrap; overflow: auto; max-height: 260px; }
-@media (max-width: 950px) {
-  :root { --label-width: 170px; }
-  .workspace { grid-template-columns: minmax(0, 1fr); }
-  .inspector { position: static; }
+
+.untimed { padding: 0 24px 8px; }
+.untimed summary { cursor: pointer; }
+.result-list { display: grid; gap: 4px; margin: 8px 0; }
+.result-list button { overflow-wrap: anywhere; }
+.notice { font-size: 12px; color: var(--mb-muted); overflow-wrap: anywhere; }
+
+.inspector.mb-card {
+  position: fixed;
+  z-index: 4;
+  right: 16px;
+  bottom: 16px;
+  width: min(640px, calc(100vw - 32px));
+  max-height: 76vh;
+  margin: 0;
+  padding: 16px 20px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  box-shadow: 0 4px 18px #0002;
 }
+
+.inspector h2 { margin: 0 0 12px; }
+.inspector h3 { margin: 12px 0 4px; font-size: 15px; }
+.inspector dl { margin: 12px 0 0; }
+.inspector dt { color: var(--mb-muted); font-size: 12px; }
+.inspector dd { margin: 0 0 6px; font-variant-numeric: tabular-nums; }
+.inspector pre {
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  background: var(--mb-bg);
+  border-color: var(--mb-rule);
+  font-family: var(--mb-font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow: auto;
+}
+#dismiss { float: right; }
+
 @media (max-width: 630px) {
+  :root { --trace-label-width: 46%; }
+  .mb-page.trace-page { padding-top: 16px; }
+  .timeline-head { padding: 14px 12px 8px; }
+  .legend, .timeline-foot, .untimed { padding-inline: 12px; }
+  .lane { grid-template-columns: 88px minmax(0, 1fr); }
+  .tick:nth-child(even) { display: none; }
+  .row-time, .row-tokens, .tick { font-size: 10px; }
 }
-header {padding:10px clamp(12px,3vw,44px);display:flex;align-items:baseline;gap:24px}
-header h1 {font:600 16px system-ui} header details {margin:0;color:var(--muted)}
-main {max-width:none;padding-top:14px}
-.workspace {display:block}
-.timeline-head {padding:16px}
-#timeline-title {font-size:23px} #overview-meta {font-variant-numeric:tabular-nums;color:var(--muted)}
-#overview {margin:14px 0 16px;border-block:1px solid var(--line);padding:6px 0}
-.lane {display:grid;grid-template-columns:90px 1fr;align-items:center;font-size:12px;color:var(--muted);height:19px}
-.rail {height:100%;position:relative;background:repeating-linear-gradient(to right,var(--line) 0 1px,transparent 1px 25%)}
-.rail i {position:absolute;height:6px;top:7px;border-radius:2px}
-.inspector {position:fixed;z-index:4;right:16px;bottom:16px;top:auto;width:min(360px,94vw);max-height:58vh;overflow:auto;box-shadow:0 6px 32px #0008}
-#dismiss {float:right} .scroll {max-height:58vh}
-@media(max-width:630px){.chart{min-width:0}:root{--label-width:132px}.row-time{font-size:10px}.timeline-head{padding:10px}.tick:nth-child(even){display:none}}
-@media(min-width:631px){:root{--label-width:clamp(260px,32vw,440px)}}
-.row-description {min-width:0;display:grid;text-align:left}
-.row-note {font-size:12px;line-height:1.45;color:var(--muted);white-space:normal}
-.row:has(.mark[data-failed="true"]) .row-note {color:var(--error)}
-@media(max-width:630px){:root{--label-width:46%}}
-.inspector {width:min(640px,94vw);max-height:76vh}.inspector pre {font:13px/1.6 ui-monospace,monospace;overflow-wrap:anywhere}
+
+@media (max-width: 410px) {
+  .row-label { flex-wrap: wrap; gap: 0; }
+  .row-description { width: 100%; }
+  .row-metrics { margin-inline-start: 0; text-align: start; }
+}
+
+@media print {
+  .mb-page.trace-page { max-width: none; padding: 0; }
+  .trace-card.mb-card { break-inside: auto; }
+  .scroll { max-height: none; overflow: visible; }
+  .axis { position: static; }
+  .row { break-inside: avoid; }
+  .controls, .timeline-foot button, .inspector, #theme-toggle { display: none; }
+  .mark, .rail i, .swatch { print-color-adjust: exact; }
+}
 </style>
 </head>
 <body>
-<header>
+<div class="mb-page trace-page">
+<header class="mb-header">
   <h1>Agent Trace</h1>
-  <details><summary>セッション情報</summary><p id="identity"></p><p id="source"></p><p id="measurement"></p><p id="session-usage"></p></details>
+  <div class="header-actions">
+    <details class="session-info">
+      <summary>セッション情報</summary>
+      <div class="mb-card session-panel">
+        <p id="identity"></p>
+        <p id="source" class="mb-meta-line"></p>
+        <p id="measurement"></p>
+        <p id="session-usage"></p>
+      </div>
+    </details>
+    <button id="theme-toggle" type="button" aria-pressed="false">
+      <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+        <path d="M13.8 9.1a5.9 5.9 0 0 1-6.9-6.9 5.9 5.9 0 1 0 6.9 6.9Z"/>
+      </svg>
+      ダークモード
+    </button>
+  </div>
 </header>
 <main>
   <div class="workspace">
-    <section class="panel" aria-labelledby="timeline-title">
+    <section class="mb-card trace-card" aria-labelledby="timeline-title">
       <div class="timeline-head">
-        <h2 id="timeline-title">実行タイムライン</h2><p id="overview-meta"></p>
-        <div id="overview" aria-label="セッション全体の時間軸"></div>
+        <h2 id="timeline-title">実行タイムライン</h2><p id="overview-meta" class="mb-meta-line"></p>
+        <div id="overview" class="mb-figure-frame overview" aria-label="セッション全体の時間軸"></div>
         <p id="analysis-limits" hidden></p><div id="key-insights" class="controls"></div>
         <div class="controls">
           <select id="filter" aria-label="イベント種別"></select>
           <input id="query" type="search" aria-label="イベントを検索" placeholder="名前、モデル、イベントID">
-          <button id="back" type="button" aria-label="前の時間範囲">←</button>
-          <button id="forward" type="button" aria-label="次の時間範囲">→</button>
-          <button id="zoom-in" type="button" aria-label="拡大">＋</button>
-          <button id="zoom-out" type="button" aria-label="縮小">−</button>
+          <button id="back" class="icon-button" type="button" aria-label="前の時間範囲"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m10 3-5 5 5 5M5 8h8"/></svg></button>
+          <button id="forward" class="icon-button" type="button" aria-label="次の時間範囲"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 3 5 5-5 5M11 8H3"/></svg></button>
+          <button id="zoom-in" class="icon-button" type="button" aria-label="拡大"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10M8 3v10"/></svg></button>
+          <button id="zoom-out" class="icon-button" type="button" aria-label="縮小"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h10"/></svg></button>
           <button id="fit" type="button">全体</button>
           <output id="range"></output>
         </div>
@@ -154,13 +391,14 @@ main {max-width:none;padding-top:14px}
       <div id="row-count" class="timeline-foot"></div>
       <details class="untimed" id="untimed"><summary id="untimed-title">時刻の記録がないイベント</summary><div id="untimed-rows" class="result-list"></div></details>
     </section>
-    <aside hidden class="panel inspector" aria-labelledby="inspector-title">
+    <aside hidden class="mb-card inspector" aria-labelledby="inspector-title">
       <button id="dismiss" type="button">閉じる</button><h2 id="inspector-title">イベント詳細</h2>
       <div id="inspector" aria-live="polite"><p class="muted">タイムラインからイベントを選択してください。</p></div>
     </aside>
   </div>
   <p class="notice" id="coverage"></p>
 </main>
+</div>
 <script id="trace-data" type="application/json">__TRACE_DATA__</script>
 <script>
 (() => {
@@ -294,7 +532,9 @@ function selectEvent(id, jump) {
     }
   }
   renderRows(jump);
-  document.querySelector(".inspector").hidden = false;
+  const inspector = document.querySelector(".inspector");
+  inspector.hidden = false;
+  inspector.scrollTop = 0;
   renderInspector(event);
   if (jump) {
     const row = el("event-" + id);
@@ -349,7 +589,12 @@ for (const finding of data.findings) {
 const costliest = data.usage_highlights.find(item => item.metric === "cost" && item.value > 0);
 if (costliest) addNote(costliest.event_ids[0], "イベント別の記録額で最大 " + money(costliest.value));
 const heaviest = data.usage_highlights.find(item => item.metric === "tokens" && item.value > 0);
-if (heaviest) addNote(heaviest.event_ids[0], "記録された使用量で最大 " + fmt.format(heaviest.value) + " トークン");
+if (heaviest) addNote(heaviest.event_ids[0], "記録された使用量で最大");
+function tokenLabel(event) {
+  if (event.token_count == null) return null;
+  const className = event.id === heaviest?.event_ids[0] ? "row-tokens maximum" : "row-tokens";
+  return node("span", fmt.format(event.token_count) + " トークン", className);
+}
 function rowNote(event) {
   const parts = [...(notes.get(event.id) || [])];
   if (event.failed || event.kind === "error") parts.unshift(event.exit_code != null ? "終了コード " + event.exit_code + "。実行結果を確認" : "エラーが記録された");
@@ -383,7 +628,11 @@ function renderRow(event) {
   const note = rowNote(event);
   if (note) description.append(node("small", note, "row-note"));
   title.append(description);
-  if (event.end != null) title.append(node("span", time(event.end - event.start), "row-time"));
+  const metrics = node("span", null, "row-metrics");
+  const tokens = tokenLabel(event);
+  if (tokens) metrics.append(tokens);
+  if (event.end != null) metrics.append(node("span", time(event.end - event.start), "row-time"));
+  if (metrics.childElementCount) title.append(metrics);
   row.title = eventName(event);
   const track = node("span", null, "track");
   for (const [percent] of tickData()) {
@@ -439,6 +688,8 @@ function renderRows(jump = false) {
     });
     item.id = "event-" + event.id;
     item.setAttribute("aria-current", selection === event.id);
+    const tokens = tokenLabel(event);
+    if (tokens) item.append("　", tokens);
     return item;
   }));
   unknownRows.append(...pageControls(untimedPage, unknown.length, page => {
@@ -453,6 +704,11 @@ function pageControls(current, count, changePage) {
   if ((current + 1) * pageSize < count) controls.push(button("次のページ", () => changePage(current + 1)));
   return controls;
 }
+function codeBlock(value) {
+  const pre = node("pre");
+  pre.append(node("code", stringify(value), "language-plaintext"));
+  return pre;
+}
 function stringify(value) {
   return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
@@ -466,7 +722,7 @@ function renderInspector(event) {
   panel.replaceChildren(node("h3", eventName(event)));
   const op = event.operation || {};
   function evidence(label, value) {
-    if (value != null && value !== "") panel.append(node("h3", label), node("pre", stringify(value)));
+    if (value != null && value !== "") panel.append(node("h3", label), codeBlock(value));
   }
   if (op.paths?.length) evidence("対象ファイル・パス", op.paths.join("\n"));
   evidence("作業ディレクトリ", op.cwd);
@@ -494,7 +750,7 @@ function renderInspector(event) {
   panel.append(details);
   if (data.include_content) {
     for (const [key, label] of [["content", event.kind === "tool" ? "入力" : "内容"], ["command", "コマンド"], ["output", "出力"]]) {
-      if (event[key] != null) panel.append(node("h3", label), node("pre", stringify(event[key])));
+      if (event[key] != null) panel.append(node("h3", label), codeBlock(event[key]));
     }
   }
   for (const id of [event.tool_id, event.result_id]) {
@@ -530,16 +786,21 @@ el("back").onclick = () => { setWindow(left - (right - left) / 2, right - left);
 el("forward").onclick = () => { setWindow(left + (right - left) / 2, right - left); refresh(); };
 el("filter").onchange = refresh;
 el("query").oninput = refresh;
+el("theme-toggle").onclick = function () {
+  const dark = this.getAttribute("aria-pressed") !== "true";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  this.setAttribute("aria-pressed", String(dark));
+};
 el("dismiss").onclick = () => {
   document.querySelector(".inspector").hidden = true;
   el("event-" + selection)?.focus();
 };
 function drawOverview() {
   const lanes = [
-    ["ツール", e => ["tool","command","result"].includes(e.kind), "var(--tool)"],
-    ["モデル・推論", e => ["model","reasoning"].includes(e.kind), "var(--model)"],
-    ["会話・ターン", e => ["turn","assistant","user"].includes(e.kind), "var(--marker)"],
-    ["エラー", e => e.failed || e.kind === "error", "var(--error)"],
+    ["ツール", e => ["tool","command","result"].includes(e.kind), "var(--trace-tool)"],
+    ["モデル・推論", e => ["model","reasoning"].includes(e.kind), "var(--trace-model)"],
+    ["会話・ターン", e => ["turn","assistant","user"].includes(e.kind), "var(--trace-conversation)"],
+    ["エラー", e => e.failed || e.kind === "error", "var(--trace-error)"],
   ];
   el("overview-meta").textContent = [data.session.agent, time(elapsed) + (breaks.length ? "（ターン間を除く）" : ""), data.counts.events + " イベント"].join("　 /　");
   for (const [label, matchesLane, color] of lanes) {

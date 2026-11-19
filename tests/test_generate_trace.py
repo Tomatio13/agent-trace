@@ -159,7 +159,10 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(report["token_summary"]["values"]["total"], 10)
         self.assertEqual([item["value"] for item in report["usage_highlights"]], [10])
         events = public_events(trace, False)
+        model = next(event for event in events if event["kind"] == "model")
+        self.assertEqual(model["token_count"], 10)
         read, check = [event for event in events if event["kind"] == "tool"][:2]
+        self.assertNotIn("token_count", read)
         self.assertEqual((read["start"], read["end"]), (EPOCH + 2, EPOCH + 14))
         self.assertEqual((check["start"], check["end"]), (EPOCH + 3, EPOCH + 5))
         self.assertEqual(len(read["refs"]), 2)
@@ -250,6 +253,10 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(report["cost_summary"]["status"], "partial")
         self.assertEqual(report["cost_summary"]["value"], 0)
         self.assertEqual(len([e for e in trace.events if e["kind"] == "model"]), 1)
+        model = next(
+            event for event in public_events(trace, False) if event["kind"] == "model"
+        )
+        self.assertEqual(model["token_count"], 20)
 
     def test_opencode_export_and_read_only_sqlite(self):
         msg = {

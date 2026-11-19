@@ -1077,6 +1077,19 @@ def cost_summary(trace, observed):
     }
 
 
+def event_token_count(source, event):
+    tokens = event.get("tokens") or {}
+    if "total" in tokens:
+        return tokens["total"]
+    fields = (
+        ("input", "output", "cache_read", "cache_write")
+        if source == "claude"
+        else ("input", "output")
+    )
+    components = [tokens[key] for key in fields if key in tokens]
+    return sum(components) if components else None
+
+
 def usage_highlights(source, events):
     def rankings(label, scores):
         return [
@@ -1086,15 +1099,10 @@ def usage_highlights(source, events):
             )[:5]
         ]
 
-    fallback = (
-        ("input", "output", "cache_read", "cache_write")
-        if source == "claude"
-        else ("input", "output")
-    )
     token_count = [
-        (tokens.get("total", sum(tokens.get(key, 0) for key in fallback)), event)
+        (count, event)
         for event in events
-        if (tokens := event.get("tokens"))
+        if (count := event_token_count(source, event)) is not None
     ]
     cost = [(event["cost"], event) for event in events if event.get("cost") is not None]
     return rankings("cost", cost) + rankings("tokens", token_count)
@@ -1395,6 +1403,12 @@ def public_events(trace, include_content, *, operations=False):
             },
             "action": action_name(event),
             **(
+                {"token_count": token_count}
+                if (token_count := event_token_count(trace.session.source, event))
+                is not None
+                else {}
+            ),
+            **(
                 {"operation": details}
                 if operations and (details := operation_details(event))
                 else {}
@@ -1431,8 +1445,13 @@ def write_private(path, content):
 
 
 def render_html(report, events, include_content):
-    template_path = Path(__file__).resolve().parents[1] / "assets" / "viewer.html"
-    template = template_path.read_text(encoding="utf-8")
+    assets = Path(__file__).resolve().parents[1] / "assets"
+    template = (assets / "viewer.html").read_text(encoding="utf-8")
+    stylesheet = (assets / "document.css").read_text(encoding="utf-8")
+    license_text = (assets / "document.css.LICENSE").read_text(encoding="utf-8")
+    template = template.replace(
+        "__DOCUMENT_CSS__", f"/*\n{license_text}*/\n{stylesheet}"
+    )
     payload = json_text(
         {
             **report,

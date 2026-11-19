@@ -2,6 +2,8 @@
 
 Claude Code、Codex CLI、OpenCode のローカルセッションログを、ブラウザで開ける単一の HTML にします。時間軸で処理の長さと重なりを確認し、気になる行を選ぶと、記録されたファイルパス、実行コマンド、終了コード、失敗時の出力を読めます。
 
+![Agent Traceの実行タイムラインと、選択したイベントのモデル使用量を表示する詳細パネル](assets/agent-trace-screenshot.png)
+
 ## コマンドで使う
 
 このディレクトリで実行します。必要なのは Python 3.10 以降とブラウザです。ログの解析と HTML の生成は Python の標準ライブラリで行い、画面の操作には HTML 内の JavaScript を使います。
@@ -47,6 +49,8 @@ agent-trace/
 ├── scripts/
 │   └── generate_trace.py
 ├── assets/
+│   ├── document.css
+│   ├── document.css.LICENSE
 │   └── viewer.html
 └── tests/
     └── test_generate_trace.py
