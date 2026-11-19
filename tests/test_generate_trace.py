@@ -134,6 +134,94 @@ class TraceTests(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
 
+    def test_claude_slash_command_displays_name_and_preserves_markup_in_arguments(self):
+        wrapper = (
+            "<command-message>aidlc</command-message>\n"
+            "<command-name>/aidlc</command-name>\n"
+            "<command-args>割り勘計算アプリ\n<feature>ブラウザのみ</feature></command-args>"
+        )
+        reverse_order = (
+            "<command-name>/clear</command-name>\n"
+            "<command-message>clear</command-message>"
+        )
+        plain = "XMLの例\n<command-name>/clear</command-name>"
+        records = [
+            {
+                "type": "user",
+                "timestamp": EPOCH + index,
+                "message": {"role": "user", "content": content},
+            }
+            for index, content in enumerate((wrapper, reverse_order, plain))
+        ]
+        trace, _ = load(args(file=write_jsonl(self.root / "claude.jsonl", records)))
+        events = public_events(trace, False, messages=True)
+        self.assertEqual(
+            [event["message"] for event in events],
+            [
+                "/aidlc\n割り勘計算アプリ\n<feature>ブラウザのみ</feature>",
+                "/clear",
+                plain,
+            ],
+        )
+        self.assertEqual(trace.events[0]["content"], wrapper)
+        self.assertEqual(events[0]["refs"], [{"line": 1}])
+
+    def test_file_operations_export_targets_and_captured_changes(self):
+        records = [
+            {
+                "type": "session_meta",
+                "timestamp": EPOCH,
+                "payload": {"id": "files", "cwd": str(self.root)},
+            },
+            *[
+                {
+                    "type": "response_item",
+                    "timestamp": EPOCH + index,
+                    "payload": {
+                        "type": "function_call",
+                        "name": name,
+                        "call_id": name,
+                        "arguments": json.dumps({"file_path": f"{name.lower()}.txt"}),
+                    },
+                }
+                for index, name in enumerate(("Read", "Write", "Edit"), 1)
+            ],
+            {
+                "type": "event_msg",
+                "timestamp": EPOCH + 5,
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "FileChange",
+                        "status": "completed",
+                        "changes": {
+                            "added.txt": {"type": "add", "content": PRIVATE},
+                            "before.txt": {"type": "update", "move_path": "after.txt"},
+                            "deleted.txt": {"type": "delete"},
+                        },
+                    },
+                },
+            },
+        ]
+        trace, _ = load(args(file=write_jsonl(self.root / "files.jsonl", records)))
+        events = public_events(trace, False, operations=True)
+        for tool, expected in zip(events[:3], ("read.txt", "write.txt", "edit.txt")):
+            self.assertEqual(tool["operation"]["paths"], [expected])
+            self.assertTrue(tool["operation"]["file_operation"])
+        self.assertEqual(
+            events[3]["operation"]["changes"],
+            [
+                {"path": "added.txt", "action": "add"},
+                {"path": "before.txt", "action": "update", "destination": "after.txt"},
+                {"path": "deleted.txt", "action": "delete"},
+            ],
+        )
+        self.assertNotIn(PRIVATE, json.dumps(events))
+        self.assertIn("BODY-DO-NOT-EXPORT", json.dumps(public_events(trace, True)))
+        self.assertTrue(
+            all("operation" not in event for event in public_events(trace, False))
+        )
+
     def test_parallel_calls_repetition_and_private_output(self):
         path = write_jsonl(self.root / "codex.jsonl", codex_records(self.root))
         with path.open("a", encoding="utf-8") as log:

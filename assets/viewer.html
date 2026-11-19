@@ -264,6 +264,7 @@ button:disabled { cursor: default; opacity: .45; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.file-preview { font-family: var(--mb-font-mono); }
 
 .track { display: block; }
 .gridline { position: absolute; inset-block: 0; border-left: 1px solid var(--mb-rule); pointer-events: none; }
@@ -278,7 +279,7 @@ button:disabled { cursor: default; opacity: .45; }
   background: var(--trace-conversation);
 }
 
-.mark[data-kind="tool"], .mark[data-kind="command"] { background: var(--trace-tool); }
+.mark[data-kind="tool"], .mark[data-kind="command"], .mark[data-kind="file_change"] { background: var(--trace-tool); }
 .mark[data-kind="model"], .mark[data-kind="reasoning"] { background: var(--trace-model); }
 .mark[data-kind="turn"] { background: transparent; border: 1px solid var(--trace-conversation); }
 .mark[data-failed="true"] { background: var(--trace-error); }
@@ -469,8 +470,18 @@ let untimedPage = 0;
 
 const kinds = {
   primary: "主な操作と要確認箇所", all: "すべてのイベント", turn: "ターン", user: "ユーザー入力", assistant: "応答",
-  tool: "ツール", result: "ツール結果", model: "モデル", reasoning: "推論", command: "コマンド", error: "エラー",
+  tool: "ツール", file_change: "ファイル操作", result: "ツール結果", model: "モデル", reasoning: "推論", command: "コマンド", error: "エラー",
 };
+const changeLabels = {add: "追加", update: "編集", delete: "削除"};
+function fileTargets(operation) {
+  if (!operation) return [];
+  return [
+    ...(operation.paths || []),
+    ...(operation.changes || []).map(change => change.destination
+      ? "移動元 " + change.path + " ／ 移動先 " + change.destination
+      : (changeLabels[change.action] ? changeLabels[change.action] + " " : "") + change.path),
+  ];
+}
 const tokenLabels = {input: "入力", output: "出力", cache_read: "キャッシュ読み込み",
   cache_write: "キャッシュ書き込み", reasoning: "推論", total: "記録合計"};
 const timingLabels = {
@@ -497,10 +508,19 @@ function button(text, action) {
   item.addEventListener("click", action);
   return item;
 }
-function time(seconds) {
+function axisLabel(seconds) {
   if (seconds == null) return "不明";
   if (seconds > 0 && seconds < 1) return fmt.format(seconds * 1000) + " ms";
   return fmt.format(seconds) + " s";
+}
+function time(seconds) {
+  if (seconds == null) return "不明";
+  const milliseconds = Math.max(0, Math.round(seconds * 1000));
+  const hours = Math.floor(milliseconds / 3600000);
+  const minutes = Math.floor(milliseconds / 60000) % 60;
+  const wholeSeconds = Math.floor(milliseconds / 1000) % 60;
+  const clock = [hours, minutes, wholeSeconds].map(value => String(value).padStart(2, "0")).join(":");
+  return clock + "." + String(milliseconds % 1000).padStart(3, "0");
 }
 function eventStart(event) { return axisTime(event.start); }
 function eventEnd(event) { return axisTime(event.end ?? event.start); }
@@ -580,13 +600,13 @@ function renderAxis() {
   axis.replaceChildren();
   if (timed.length) {
     tickData().forEach(([percent, value]) => {
-      const tick = node("span", time(value), "tick");
+      const tick = node("span", axisLabel(value), "tick");
       tick.style.left = percent + "%";
       axis.append(tick);
     });
   }
   el("range").textContent = !timed.length ? "時刻なし" :
-    !elapsed ? time(0) : time(left) + " – " + time(right);
+    !elapsed ? axisLabel(0) : axisLabel(left) + " – " + axisLabel(right);
   el("back").disabled = !timed.length || left <= 0;
   el("forward").disabled = !timed.length || right >= full;
   el("zoom-in").disabled = !elapsed || right - left <= 0.001;
@@ -626,10 +646,12 @@ function matches(event) {
   const failed = event.kind === "error" || event.failed;
   if (filter === "primary") {
     if (hasCommands && !failed && !notes.has(event.id) && event.action === "ツールを呼び出す") return false;
-    if (!failed && !notes.has(event.id) && !["tool","command","user","assistant","turn"].includes(event.kind)) return false;
+    if (!failed && !notes.has(event.id) && !["tool","command","file_change","user","assistant","turn"].includes(event.kind)) return false;
+  } else if (filter === "file_change") {
+    if (event.kind !== "file_change" && !event.operation?.file_operation) return false;
   } else if (filter !== "all" && !(filter === "error" ? failed : filter === event.kind)) return false;
   if (!q) return true;
-  return [eventName(event), event.model, event.message, event.content, event.command, event.output]
+  return [eventName(event), event.label, event.model, event.message, event.questionnaire, event.content, event.command, event.output, ...fileTargets(event.operation)]
     .some(value => value != null && stringify(value).toLowerCase().includes(q));
 }
 function renderRow(event) {
@@ -643,7 +665,13 @@ function renderRow(event) {
   const title = node("span", null, "row-label");
   const description = node("span", null, "row-description");
   description.append(node("span", event.action || event.label, "row-name"));
-  if (event.message) description.append(node("span", event.message, "message-preview"));
+  const preview = event.message || event.questionnaire?.items.map(item => item.question).join(" ／ ");
+  if (preview) description.append(node("span", preview, "message-preview"));
+  const files = fileTargets(event.operation);
+  if (files.length) {
+    const more = files.length > 2 ? " ／ ほか " + (files.length - 2) + " 件" : "";
+    description.append(node("span", files.slice(0, 2).join(" ／ ") + more, "message-preview file-preview"));
+  }
   const note = rowNote(event);
   if (note) description.append(node("small", note, "row-note"));
   title.append(description);
@@ -707,7 +735,10 @@ function renderRows(jump = false) {
     });
     item.id = "event-" + event.id;
     item.setAttribute("aria-current", selection === event.id);
-    if (event.message) item.append(node("span", event.message, "message-preview"));
+    const preview = event.message || event.questionnaire?.items.map(item => item.question).join(" ／ ");
+    if (preview) item.append(node("span", preview, "message-preview"));
+    const files = fileTargets(event.operation);
+    if (files.length) item.append(node("span", files[0], "message-preview file-preview"));
     const tokens = tokenLabel(event);
     if (tokens) item.append("　", tokens);
     return item;
@@ -741,11 +772,31 @@ function renderInspector(event) {
   const panel = el("inspector");
   panel.replaceChildren(node("h3", eventName(event)));
   if (event.message) panel.append(node("p", event.message, "message-body"));
+  if (event.questionnaire) {
+    for (const item of event.questionnaire.items) {
+      panel.append(node("h3", "質問"), node("p", item.question, "message-body"));
+      if (item.options.length) {
+        const options = node("ul");
+        for (const option of item.options) {
+          const line = node("li");
+          line.append(node("strong", option.label));
+          if (option.description) line.append(" — " + option.description);
+          options.append(line);
+        }
+        panel.append(node("h3", item.multiple ? "選択肢（複数選択）" : "選択肢"), options);
+      }
+      if (item.answer) panel.append(node("h3", "回答"), node("p", item.answer, "message-body"));
+    }
+    if (event.questionnaire.recorded_response) {
+      panel.append(node("h3", "回答の記録"), node("p", event.questionnaire.recorded_response, "message-body"));
+    }
+  }
   const op = event.operation || {};
   function evidence(label, value) {
     if (value != null && value !== "") panel.append(node("h3", label), codeBlock(value));
   }
-  if (op.paths?.length) evidence("対象ファイル・パス", op.paths.join("\n"));
+  const files = fileTargets(op);
+  if (files.length) evidence("対象ファイル・パス", files.join("\n"));
   evidence("作業ディレクトリ", op.cwd);
   evidence("実行コマンド", op.command);
   if (event.exit_code != null) evidence("終了コード", event.exit_code);
@@ -755,6 +806,7 @@ function renderInspector(event) {
     if (value != null) details.append(node("dt", label), node("dd", value));
   }
   detail("種別", kinds[event.kind]);
+  if (event.kind === "tool") detail("ツール名", event.label);
   detail("開始", event.start == null ? "不明" : time(eventStart(event)) + " · " + new Date(event.start * 1000).toISOString());
   if (event.end != null) {
     detail("終了", time(eventEnd(event)) + " · " + new Date(event.end * 1000).toISOString());
@@ -818,7 +870,7 @@ el("dismiss").onclick = () => {
 };
 function drawOverview() {
   const lanes = [
-    ["ツール", e => ["tool","command","result"].includes(e.kind), "var(--trace-tool)"],
+    ["ツール", e => ["tool","command","file_change","result"].includes(e.kind), "var(--trace-tool)"],
     ["モデル・推論", e => ["model","reasoning"].includes(e.kind), "var(--trace-model)"],
     ["会話・ターン", e => ["turn","assistant","user"].includes(e.kind), "var(--trace-conversation)"],
     ["エラー", e => e.failed || e.kind === "error", "var(--trace-error)"],

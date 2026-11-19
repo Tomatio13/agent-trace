@@ -5,6 +5,7 @@ import argparse
 import html
 import json
 import os
+import re
 import shlex
 import sqlite3
 import sys
@@ -506,6 +507,7 @@ def claude_trace(trace, records):
                     call=block.get("tool_use_id"),
                     failed=failed,
                     content=block.get("content"),
+                    answers=obj(record.get("toolUseResult")).get("answers"),
                 )
 
 
@@ -604,6 +606,19 @@ def codex_trace(trace, records):
                         exit_code=exit_code,
                         failed=status == "failed"
                         or (type(exit_code) is int and exit_code != 0),
+                    )
+                elif item_type == "FileChange":
+                    trace.add(
+                        "file_change",
+                        "ファイル変更の記録",
+                        started or completed or at,
+                        ref,
+                        end=completed if started else None,
+                        timing="recorded",
+                        turn=key,
+                        content=item.get("changes"),
+                        output=item.get("stderr") or item.get("stdout"),
+                        failed=item.get("status") in ("failed", "declined"),
                     )
                 elif item_type == "Reasoning" and started and completed:
                     trace.add(
@@ -992,6 +1007,7 @@ def pair_tools(trace):
             continue
         start.update(
             output=event.get("content"),
+            answers=event.get("answers"),
             failed=event.get("failed", False),
             exit_code=event.get("exit_code"),
             result_id=event["id"],
@@ -1273,13 +1289,85 @@ TOOL_ACTIONS = {
     "read": "ファイルを読む",
     "write": "ファイルを書き込む",
     "edit": "ファイルを編集",
+    "multiedit": "ファイルを編集",
     "apply_patch": "変更をファイルに適用",
     "wait": "開始済みの処理を待つ",
     "request_user_input": "ユーザーの回答待ち",
+    "askuserquestion": "ユーザーへの質問",
     "sleep": "指定時間の待機",
     "exec": "ツールを呼び出す",
     "web_search": "ウェブを検索",
 }
+FILE_TOOL_ACTIONS = {"read", "write", "edit", "multiedit", "apply_patch"}
+QUESTION_TOOLS = {"askuserquestion", "request_user_input"}
+
+
+def question_details(event):
+    questions = obj(event.get("content")).get("questions")
+    if not isinstance(questions, list):
+        return {}
+    output = event.get("output")
+    answers = obj(event.get("answers") or obj(decoded(output)).get("answers"))
+    items = []
+    for raw in questions:
+        question = obj(raw)
+        prompt = question.get("question")
+        if not isinstance(prompt, str) or not prompt.strip():
+            continue
+        raw_options = question.get("options")
+        options = (
+            [
+                {"label": option["label"], "description": option.get("description")}
+                for option in (obj(option) for option in raw_options)
+                if isinstance(option.get("label"), str)
+            ]
+            if isinstance(raw_options, list)
+            else []
+        )
+        question_id = question.get("id")
+        answer = answers.get(question_id if isinstance(question_id, str) else prompt)
+        if isinstance(answer, dict):
+            answer = answer.get("answers")
+        if isinstance(answer, list):
+            answer = "\n".join(value for value in answer if isinstance(value, str))
+        items.append(
+            {
+                "question": prompt,
+                "options": options,
+                "answer": answer if isinstance(answer, str) else None,
+                "multiple": question.get("multiSelect") is True,
+            }
+        )
+    if not items:
+        return {}
+    result = {"items": items}
+    if (
+        not answers
+        and isinstance(output, str)
+        and output.strip()
+        and not event.get("failed")
+    ):
+        result["recorded_response"] = output
+    return result
+
+
+def patch_targets(text):
+    if not isinstance(text, str) or not text.lstrip().startswith("*** Begin Patch"):
+        return []
+    targets = []
+    for line in text.splitlines():
+        for prefix, action in (
+            ("*** Add File: ", "add"),
+            ("*** Update File: ", "update"),
+            ("*** Delete File: ", "delete"),
+        ):
+            if line.startswith(prefix):
+                targets.append({"path": line[len(prefix) :], "action": action})
+                break
+        else:
+            if line.startswith("*** Move to: ") and targets:
+                targets[-1]["destination"] = line.removeprefix("*** Move to: ")
+    return targets
 
 
 def command_action(command):
@@ -1365,14 +1453,35 @@ PUBLIC_EVENT_FIELDS = {
 
 def operation_details(event):
     kind = event["kind"]
-    if kind not in ("command", "tool", "error", "result") and not event.get("failed"):
+    if kind not in (
+        "command",
+        "tool",
+        "file_change",
+        "error",
+        "result",
+    ) and not event.get("failed"):
         return {}
-    args = obj(event.get("content"))
+    raw = event.get("content")
+    args = obj(raw)
+    tool = event["label"].lower().split(".")[-1] if kind == "tool" else None
     paths = [
         args[key]
-        for key in ("file_path", "filePath", "path", "filename")
-        if isinstance(args.get(key), str)
+        for key in ("file_path", "filePath", "filepath", "path", "filename")
+        if isinstance(args.get(key), str) and args[key]
     ]
+    changes = []
+    if kind == "file_change":
+        for path, entry in args.items():
+            change = obj(entry)
+            item = {"path": path, "action": change.get("type")}
+            if isinstance(change.get("move_path"), str) and change["move_path"]:
+                item["destination"] = change["move_path"]
+            changes.append(item)
+    elif tool == "apply_patch":
+        patch = (
+            raw if isinstance(raw, str) else args.get("patch") or args.get("patchText")
+        )
+        changes = patch_targets(patch)
     paths.extend(
         part["path"]
         for part in (event.get("parsed_cmd") or [])
@@ -1389,6 +1498,15 @@ def operation_details(event):
         command = event["content"]
     details = {
         "paths": list(dict.fromkeys(paths)),
+        "changes": changes,
+        "file_operation": (
+            kind == "file_change"
+            or tool in FILE_TOOL_ACTIONS
+            or any(
+                obj(part).get("type") == "read"
+                for part in event.get("parsed_cmd") or []
+            )
+        ),
         "command": command,
         "cwd": event.get("cwd") or args.get("workdir") or args.get("cwd"),
     }
@@ -1408,6 +1526,23 @@ def operation_details(event):
                 else "…（末尾6000文字）\n" + message[-6000:]
             )
     return {key: value for key, value in details.items() if value}
+
+
+def claude_user_message(content):
+    # Claude Code wraps slash commands in these fields, in either order.
+    command = re.fullmatch(
+        r"\s*(?:<command-message>[^<>]*</command-message>\s*)?"
+        r"<command-name>(?P<name>/[^<>\s]+)</command-name>\s*"
+        r"(?:<command-message>[^<>]*</command-message>\s*)?"
+        r"(?:<command-args>(?P<args>.*)</command-args>\s*)?",
+        content,
+        flags=re.DOTALL,
+    )
+    if not command:
+        return content
+    name = command["name"]
+    arguments = command["args"]
+    return f"{name}\n{arguments}" if arguments and arguments.strip() else name
 
 
 def public_events(trace, include_content, *, operations=False, messages=False):
@@ -1438,8 +1573,19 @@ def public_events(trace, include_content, *, operations=False, messages=False):
             and isinstance(content, str)
             and content.strip()
         ):
-            public["message"] = content
+            public["message"] = (
+                claude_user_message(content)
+                if trace.session.source == "claude" and event["kind"] == "user"
+                else content
+            )
             public.pop("content", None)
+        if (
+            (messages or include_content)
+            and event["kind"] == "tool"
+            and event["label"].lower().split(".")[-1] in QUESTION_TOOLS
+            and (questionnaire := question_details(event))
+        ):
+            public["questionnaire"] = questionnaire
         events.append(public)
     return events
 
