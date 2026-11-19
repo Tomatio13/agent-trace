@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>Agent Trace — __TRACE_TITLE__</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #101519;
+  --surface: #171e23;
+  --raised: #1e272e;
+  --line: #303c45;
+  --text: #e8eff4;
+  --muted: #a4b3bf;
+  --focus: #92d7fc;
+  --tool: #5bc8b0;
+  --model: #87aef5;
+  --error: #ff988b;
+  --marker: #a7bac8;
+  --label-width: 215px;
+  font: 14px/1.5 system-ui, sans-serif;
+}
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; color: var(--text); background: var(--bg); }
+button, select, input { font: inherit; color: inherit; }
+button, select, input[type="search"] {
+  border: 1px solid var(--line); border-radius: 6px; background: var(--raised); padding: 6px 10px;
+}
+button { cursor: pointer; text-align: left; }
+button:hover, button[aria-current="true"] { background: #283b47; }
+button:disabled { cursor: default; opacity: .45; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+header { padding: 22px clamp(16px, 4vw, 54px); border-bottom: 1px solid var(--line); background: var(--surface); }
+header h1 { margin: 0 0 4px; font-size: 24px; letter-spacing: -.025em; }
+header p, .muted { color: var(--muted); }
+header p { margin: 5px 0 0; overflow-wrap: anywhere; }
+main { max-width: 1600px; margin: auto; padding: 20px clamp(12px, 3vw, 44px) 40px; }
+h2 { margin: 0; font-size: 17px; }
+h3 { margin: 0 0 7px; font-size: 14px; }
+p { margin: 6px 0; }
+.panel { border: 1px solid var(--line); border-radius: 9px; background: var(--surface); min-width: 0; }
+.notice { color: var(--muted); overflow-wrap: anywhere; }
+.notice { margin: 10px 1px; font-size: 13px; }
+details { margin: 10px 0 14px; }
+summary { cursor: pointer; }
+.result-list { display: grid; gap: 4px; margin: 0 0 12px; }
+.result-list button { overflow-wrap: anywhere; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1fr) minmax(255px, 300px); gap: 12px; align-items: start; }
+.timeline-head { padding: 10px 12px; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 0; }
+.controls input[type="search"] { min-width: 0; width: 165px; }
+.controls output { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; padding: 2px 12px 9px; color: var(--muted); font-size: 12px; }
+.swatch { display: inline-block; width: 10px; height: 7px; border-radius: 2px; margin-right: 4px; background: var(--marker); }
+.swatch.tool { background: var(--tool); }
+.swatch.model { background: var(--model); }
+.swatch.error { background: var(--error); }
+.swatch.point { width: 7px; transform: rotate(45deg); }
+.scroll { overflow: auto; max-height: 62vh; border-top: 1px solid var(--line); }
+.chart { min-width: 460px; }
+.axis, .row { display: grid; grid-template-columns: var(--label-width) minmax(0, 1fr); width: 100%; }
+.axis { position: sticky; top: 0; z-index: 2; background: var(--raised); border-bottom: 1px solid var(--line); min-height: 31px; }
+.axis > span { padding: 5px 10px; }
+.axis-track { margin: 0 15px 0 9px; position: relative; }
+.tick { position: absolute; top: 5px; transform: translateX(-50%); white-space: nowrap; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tick:first-child { transform: none; }
+.tick:last-child:not(:first-child) { transform: translateX(-100%); }
+.row { border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; padding: 0; min-height: 35px; }
+.row:focus-visible { outline-offset: -2px; }
+.row-label { display: flex; align-items: center; gap: 5px; padding: 5px 7px 5px 10px; min-width: 0; border-right: 1px solid var(--line); }
+.row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-time { margin-left: auto; flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.track { display: block; position: relative; margin: 0 15px 0 9px; }
+.gridline { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); pointer-events: none; }
+.mark { position: absolute; top: 50%; transform: translateY(-50%); height: 10px; min-width: 2px; border-radius: 3px; background: var(--marker); }
+.mark[data-kind="tool"], .mark[data-kind="command"] { background: var(--tool); }
+.mark[data-kind="model"], .mark[data-kind="reasoning"] { background: var(--model); }
+.mark[data-kind="turn"] { background: transparent; border: 1px solid var(--marker); }
+.mark[data-failed="true"] { background: var(--error); }
+.mark.point { height: 7px; width: 7px; border-radius: 1px; transform: translate(-50%, -50%) rotate(45deg); }
+.mark[data-zero="true"] { min-width: 2px; }
+.timeline-foot { padding: 8px 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.untimed { padding: 0 12px; }
+.inspector { padding: 12px 14px; overflow-wrap: anywhere; position: sticky; top: 10px; }
+.inspector dl { margin: 10px 0 0; }
+.inspector dt { color: var(--muted); font-size: 12px; }
+.inspector dd { margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+pre { padding: 9px; background: var(--bg); border-radius: 5px; white-space: pre-wrap; overflow: auto; max-height: 260px; }
+@media (max-width: 950px) {
+  :root { --label-width: 170px; }
+  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .inspector { position: static; }
+}
+@media (max-width: 630px) {
+}
+header {padding:10px clamp(12px,3vw,44px);display:flex;align-items:baseline;gap:24px}
+header h1 {font:600 16px system-ui} header details {margin:0;color:var(--muted)}
+main {max-width:none;padding-top:14px}
+.workspace {display:block}
+.timeline-head {padding:16px}
+#timeline-title {font-size:23px} #overview-meta {font-variant-numeric:tabular-nums;color:var(--muted)}
+#overview {margin:14px 0 16px;border-block:1px solid var(--line);padding:6px 0}
+.lane {display:grid;grid-template-columns:90px 1fr;align-items:center;font-size:12px;color:var(--muted);height:19px}
+.rail {height:100%;position:relative;background:repeating-linear-gradient(to right,var(--line) 0 1px,transparent 1px 25%)}
+.rail i {position:absolute;height:6px;top:7px;border-radius:2px}
+.inspector {position:fixed;z-index:4;right:16px;bottom:16px;top:auto;width:min(360px,94vw);max-height:58vh;overflow:auto;box-shadow:0 6px 32px #0008}
+#dismiss {float:right} .scroll {max-height:58vh}
+@media(max-width:630px){.chart{min-width:0}:root{--label-width:132px}.row-time{font-size:10px}.timeline-head{padding:10px}.tick:nth-child(even){display:none}}
+@media(min-width:631px){:root{--label-width:clamp(260px,32vw,440px)}}
+.row-description {min-width:0;display:grid;text-align:left}
+.row-note {font-size:12px;line-height:1.45;color:var(--muted);white-space:normal}
+.row:has(.mark[data-failed="true"]) .row-note {color:var(--error)}
+@media(max-width:630px){:root{--label-width:46%}}
+.inspector {width:min(640px,94vw);max-height:76vh}.inspector pre {font:13px/1.6 ui-monospace,monospace;overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<header>
+  <h1>Agent Trace</h1>
+  <details><summary>セッション情報</summary><p id="identity"></p><p id="source"></p><p id="measurement"></p><p id="session-usage"></p></details>
+</header>
+<main>
+  <div class="workspace">
+    <section class="panel" aria-labelledby="timeline-title">
+      <div class="timeline-head">
+        <h2 id="timeline-title">実行タイムライン</h2><p id="overview-meta"></p>
+        <div id="overview" aria-label="セッション全体の時間軸"></div>
+        <p id="analysis-limits" hidden></p><div id="key-insights" class="controls"></div>
+        <div class="controls">
+          <select id="filter" aria-label="イベント種別"></select>
+          <input id="query" type="search" aria-label="イベントを検索" placeholder="名前、モデル、イベントID">
+          <button id="back" type="button" aria-label="前の時間範囲">←</button>
+          <button id="forward" type="button" aria-label="次の時間範囲">→</button>
+          <button id="zoom-in" type="button" aria-label="拡大">＋</button>
+          <button id="zoom-out" type="button" aria-label="縮小">−</button>
+          <button id="fit" type="button">全体</button>
+          <output id="range"></output>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="swatch tool"></i>ツール</span>
+        <span><i class="swatch model"></i>モデル・推論</span>
+        <span><i class="swatch error"></i>エラー</span>
+        <span><i class="swatch point"></i>イベント時刻</span>
+      </div>
+      <div class="scroll" id="scroll">
+        <div class="chart">
+          <div class="axis"><span>イベント</span><div id="axis" class="axis-track"></div></div>
+          <div id="rows"></div>
+        </div>
+      </div>
+      <div id="row-count" class="timeline-foot"></div>
+      <details class="untimed" id="untimed"><summary id="untimed-title">時刻の記録がないイベント</summary><div id="untimed-rows" class="result-list"></div></details>
+    </section>
+    <aside hidden class="panel inspector" aria-labelledby="inspector-title">
+      <button id="dismiss" type="button">閉じる</button><h2 id="inspector-title">イベント詳細</h2>
+      <div id="inspector" aria-live="polite"><p class="muted">タイムラインからイベントを選択してください。</p></div>
+    </aside>
+  </div>
+  <p class="notice" id="coverage"></p>
+</main>
+<script id="trace-data" type="application/json">__TRACE_DATA__</script>
+<script>
+(() => {
+"use strict";
+const data = JSON.parse(document.getElementById("trace-data").textContent);
+const byId = new Map(data.events.map(event => [event.id, event]));
+const timed = data.events.filter(event => event.start != null).sort((a, b) => a.start - b.start || a.id - b.id);
+const untimed = data.events.filter(event => event.start == null);
+const pageSize = 300;
+const rangeStart = data.range.start ?? 0;
+// Fold only gaps bounded by consecutive recorded turns. An event or span
+// inside the gap is evidence of activity, so keep that interval visible.
+function turnBreaks(events) {
+  const gaps = [];
+  let lastEnd = null;
+  for (const turn of events.filter(event => event.kind === "turn")) {
+    if (lastEnd != null && turn.start > lastEnd) {
+      gaps.push({start: lastEnd, end: turn.start});
+    }
+    lastEnd = turn.end == null ? null : Math.max(lastEnd ?? turn.end, turn.end);
+  }
+  let index = 0;
+  let coveredUntil = -Infinity;
+  return gaps.filter(gap => {
+    while (index < events.length && events[index].start < gap.end) {
+      const event = events[index++];
+      coveredUntil = Math.max(coveredUntil, event.end ?? event.start);
+    }
+    return coveredUntil <= gap.start;
+  });
+}
+const breaks = turnBreaks(timed);
+let omitted = 0;
+for (const gap of breaks) {
+  omitted += gap.end - gap.start;
+  gap.omittedThroughEnd = omitted;
+}
+function axisTime(timestamp) {
+  let low = 0;
+  let high = breaks.length;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (breaks[mid].end <= timestamp) low = mid + 1;
+    else high = mid;
+  }
+  return timestamp - rangeStart - (low ? breaks[low - 1].omittedThroughEnd : 0);
+}
+const elapsed = data.range.end == null ? null : axisTime(data.range.end);
+const full = Math.max(0.001, elapsed ?? 0);
+let left = 0;
+let right = full;
+let selection = null;
+let timedPage = 0;
+let untimedPage = 0;
+
+const kinds = {
+  primary: "主な操作と要確認箇所", all: "すべてのイベント", turn: "ターン", user: "ユーザー入力", assistant: "応答",
+  tool: "ツール", result: "ツール結果", model: "モデル", reasoning: "推論", command: "コマンド", error: "エラー",
+};
+const tokenLabels = {input: "入力", output: "出力", cache_read: "キャッシュ読み込み",
+  cache_write: "キャッシュ書き込み", reasoning: "推論", total: "記録合計"};
+const timingLabels = {
+  paired: "呼び出し・結果の時刻差", recorded: "記録された開始・終了", turn: "ターン全体",
+  message: "メッセージ全体",
+};
+const warningLabels = {
+  empty_sessions_skipped: "表示対象がなくスキップしたセッション",
+  invalid_record: "読めなかったレコード", invalid_interval: "不整合のある区間", unmatched_result: "対応する呼び出しがない結果",
+  unmatched_tool: "終了が確認できないツール", inaccessible_sources: "読み込めなかったログ",
+};
+const el = id => document.getElementById(id);
+const fmt = new Intl.NumberFormat("ja-JP", {maximumFractionDigits: 3});
+const dollars = new Intl.NumberFormat("en-US", {style: "currency", currency: "USD", maximumFractionDigits: 8});
+function node(tag, text, cssClass) {
+  const item = document.createElement(tag);
+  if (text != null) item.textContent = text;
+  if (cssClass) item.className = cssClass;
+  return item;
+}
+function button(text, action) {
+  const item = node("button", text);
+  item.type = "button";
+  item.addEventListener("click", action);
+  return item;
+}
+function time(seconds) {
+  if (seconds == null) return "不明";
+  if (seconds > 0 && seconds < 1) return fmt.format(seconds * 1000) + " ms";
+  return fmt.format(seconds) + " s";
+}
+function eventStart(event) { return axisTime(event.start); }
+function eventEnd(event) { return axisTime(event.end ?? event.start); }
+function money(value) {
+  if (value == null) return "不明";
+  if (value > 0 && value < 0.00000001) return "$" + value.toExponential(2);
+  return dollars.format(value);
+}
+function tokenParts(tokens) {
+  return Object.entries(tokens).map(([key, value]) => tokenLabels[key] + " " + fmt.format(value));
+}
+function fillSummary() {
+  const {session, counts, warnings} = data;
+  el("identity").textContent = session.agent + " · " + session.id;
+  el("source").textContent = [session.cwd, session.path].filter(Boolean).join(" · ");
+  el("measurement").textContent = counts.timed + " 件に時刻あり · " + counts.spans + " 区間を計測";
+  const tokens = tokenParts(data.token_summary.values);
+  const cost = data.cost_summary;
+  const price = cost.value == null ? "金額の記録なし" : (cost.status === "partial" ? "一部記録 " : "記録金額 ") + money(cost.value);
+  el("session-usage").textContent = [tokens.length ? "トークン　" + tokens.join(" ／ ") : "トークンの記録なし", price].join("　·　");
+  const limits = Object.entries(warnings).map(([key, count]) => warningLabels[key] + " " + count + " 件");
+  limits.unshift(data.include_content ? "本文を含むローカルレポート" : data.events.some(e => e.operation) ? "コマンド・対象パス・失敗出力を含む" : "メタデータのみ");
+  el("analysis-limits").textContent = (data.limitations || []).join(" ");
+  el("analysis-limits").hidden = !el("analysis-limits").textContent;
+  el("coverage").textContent = limits.join(" · ");
+}
+function eventName(event) {
+  return "#" + event.id + " " + (event.action || event.label);
+}
+function selectEvent(id, jump) {
+  const event = byId.get(id);
+  if (!event) return;
+  selection = id;
+  if (jump) {
+    el("filter").value = "all";
+    el("query").value = "";
+    timedPage = 0;
+    untimedPage = 0;
+    if (event.start != null && (eventStart(event) < left || eventStart(event) > right)) {
+      setWindow(eventStart(event) - (right - left) / 3, right - left);
+      renderAxis();
+    }
+  }
+  renderRows(jump);
+  document.querySelector(".inspector").hidden = false;
+  renderInspector(event);
+  if (jump) {
+    const row = el("event-" + id);
+    row?.scrollIntoView({block: "nearest"});
+    row?.focus({preventScroll: true});
+  }
+}
+function setWindow(start, width) {
+  const size = Math.max(Math.min(full, 0.001), Math.min(full, width));
+  left = Math.max(0, Math.min(full - size, start));
+  right = left + size;
+}
+function zoom(factor) {
+  const size = right - left;
+  const center = (right + left) / 2;
+  setWindow(center - size * factor / 2, size * factor);
+  refresh();
+}
+function tickData() {
+  if (elapsed === 0) return [[0, 0]];
+  return [0, 25, 50, 75, 100].map(percent => [percent, left + (right - left) * percent / 100]);
+}
+function renderAxis() {
+  const axis = el("axis");
+  axis.replaceChildren();
+  if (timed.length) {
+    tickData().forEach(([percent, value]) => {
+      const tick = node("span", time(value), "tick");
+      tick.style.left = percent + "%";
+      axis.append(tick);
+    });
+  }
+  el("range").textContent = !timed.length ? "時刻なし" :
+    !elapsed ? time(0) : time(left) + " – " + time(right);
+  el("back").disabled = !timed.length || left <= 0;
+  el("forward").disabled = !timed.length || right >= full;
+  el("zoom-in").disabled = !elapsed || right - left <= 0.001;
+  el("zoom-out").disabled = right - left >= full;
+  el("fit").disabled = right - left >= full;
+}
+const notes = new Map();
+function addNote(id, text) {
+  if (!notes.has(id)) notes.set(id, []);
+  notes.get(id).push(text);
+}
+for (const finding of data.findings) {
+  const ids = finding.event_ids;
+  if (finding.kind === "repeat") addNote(ids[0], finding.label + " が同じ結果で " + finding.count + " 回。再試行で進展したか確認");
+  if (finding.kind === "gap") addNote(ids[0], "次の記録まで " + time(finding.seconds) + " 空白。待ちの原因は未記録");
+  if (finding.kind === "slow") addNote(ids[0], "この区間に " + time(finding.seconds));
+}
+const costliest = data.usage_highlights.find(item => item.metric === "cost" && item.value > 0);
+if (costliest) addNote(costliest.event_ids[0], "イベント別の記録額で最大 " + money(costliest.value));
+const heaviest = data.usage_highlights.find(item => item.metric === "tokens" && item.value > 0);
+if (heaviest) addNote(heaviest.event_ids[0], "記録された使用量で最大 " + fmt.format(heaviest.value) + " トークン");
+function rowNote(event) {
+  const parts = [...(notes.get(event.id) || [])];
+  if (event.failed || event.kind === "error") parts.unshift(event.exit_code != null ? "終了コード " + event.exit_code + "。実行結果を確認" : "エラーが記録された");
+  else if (event.kind === "command" && event.exit_code === 0) parts.unshift("正常終了");
+  return parts.join(" ／ ");
+}
+const hasCommands = data.events.some(event => event.kind === "command");
+function matches(event) {
+  const filter = el("filter").value;
+  const q = el("query").value.trim().toLowerCase();
+  const failed = event.kind === "error" || event.failed;
+  if (filter === "primary") {
+    if (hasCommands && !failed && !notes.has(event.id) && event.action === "ツールを呼び出す") return false;
+    if (!failed && !notes.has(event.id) && !["tool","command","user","assistant","turn"].includes(event.kind)) return false;
+  } else if (filter !== "all" && !(filter === "error" ? failed : filter === event.kind)) return false;
+  if (!q) return true;
+  return [eventName(event), event.model, event.content, event.command, event.output]
+    .some(value => value != null && stringify(value).toLowerCase().includes(q));
+}
+function renderRow(event) {
+  const row = button(null, () => {
+    selectEvent(event.id, false);
+    el("event-" + event.id)?.focus({preventScroll: true});
+  });
+  row.id = "event-" + event.id;
+  row.className = "row";
+  row.setAttribute("aria-current", selection === event.id);
+  const title = node("span", null, "row-label");
+  const description = node("span", null, "row-description");
+  description.append(node("span", event.action || event.label, "row-name"));
+  const note = rowNote(event);
+  if (note) description.append(node("small", note, "row-note"));
+  title.append(description);
+  if (event.end != null) title.append(node("span", time(event.end - event.start), "row-time"));
+  row.title = eventName(event);
+  const track = node("span", null, "track");
+  for (const [percent] of tickData()) {
+    const grid = node("span", null, "gridline");
+    grid.style.left = percent + "%";
+    track.append(grid);
+  }
+  const point = event.end == null;
+  const mark = node("span", null, "mark" + (point ? " point" : ""));
+  const percent = value => Math.max(0, Math.min(100, 100 * (value - left) / (right - left)));
+  const start = percent(eventStart(event));
+  mark.style.left = start + "%";
+  if (!point) mark.style.width = (percent(eventEnd(event)) - start) + "%";
+  mark.dataset.kind = event.kind;
+  mark.dataset.failed = event.kind === "error" || event.failed === true;
+  track.append(mark);
+  row.append(title, track);
+  return row;
+}
+function renderRows(jump = false) {
+  const list = timed.filter(event => eventEnd(event) >= left && eventStart(event) <= right && matches(event));
+  const unknown = untimed.filter(matches);
+  const rows = el("rows");
+  const count = el("row-count");
+  const unknownRows = el("untimed-rows");
+  if (jump) {
+    const index = list.findIndex(event => event.id === selection);
+    if (index >= 0) timedPage = Math.floor(index / pageSize);
+    const otherIndex = unknown.findIndex(event => event.id === selection);
+    if (otherIndex >= 0) {
+      untimedPage = Math.floor(otherIndex / pageSize);
+      el("untimed").open = true;
+    }
+  }
+  const start = timedPage * pageSize;
+  const stop = Math.min(start + pageSize, list.length);
+  rows.replaceChildren(...list.slice(start, stop).map(renderRow));
+  count.replaceChildren(node("span", list.length ? (start + 1) + "–" + stop + " / " + list.length + " 件" : "表示範囲に時刻付きイベントがありません。"));
+  const timedControls = pageControls(timedPage, list.length, page => {
+    timedPage = page;
+    renderRows();
+    el("scroll").scrollTop = 0;
+    rows.querySelector("button")?.focus({preventScroll: true});
+  });
+  count.append(...timedControls);
+  el("untimed").hidden = !unknown.length;
+  el("untimed-title").textContent = "時刻の記録がないイベント (" + unknown.length + ")";
+  const untimedStart = untimedPage * pageSize;
+  unknownRows.replaceChildren(...unknown.slice(untimedStart, untimedStart + pageSize).map(event => {
+    const item = button(eventName(event), () => {
+      selectEvent(event.id, false);
+      el("event-" + event.id)?.focus({preventScroll: true});
+    });
+    item.id = "event-" + event.id;
+    item.setAttribute("aria-current", selection === event.id);
+    return item;
+  }));
+  unknownRows.append(...pageControls(untimedPage, unknown.length, page => {
+    untimedPage = page;
+    renderRows();
+    unknownRows.querySelector("button")?.focus();
+  }));
+}
+function pageControls(current, count, changePage) {
+  const controls = [];
+  if (current > 0) controls.push(button("前のページ", () => changePage(current - 1)));
+  if ((current + 1) * pageSize < count) controls.push(button("次のページ", () => changePage(current + 1)));
+  return controls;
+}
+function stringify(value) {
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+function recordRef(ref) {
+  if (ref.line != null) return "行 " + ref.line;
+  if (ref.pointer) return ref.pointer;
+  return ref.table + " / " + ref.id;
+}
+function renderInspector(event) {
+  const panel = el("inspector");
+  panel.replaceChildren(node("h3", eventName(event)));
+  const op = event.operation || {};
+  function evidence(label, value) {
+    if (value != null && value !== "") panel.append(node("h3", label), node("pre", stringify(value)));
+  }
+  if (op.paths?.length) evidence("対象ファイル・パス", op.paths.join("\n"));
+  evidence("作業ディレクトリ", op.cwd);
+  evidence("実行コマンド", op.command);
+  if (event.exit_code != null) evidence("終了コード", event.exit_code);
+  evidence("失敗時の出力", op.error_output);
+  const details = node("dl");
+  function detail(label, value) {
+    if (value != null) details.append(node("dt", label), node("dd", value));
+  }
+  detail("種別", kinds[event.kind]);
+  detail("開始", event.start == null ? "不明" : time(eventStart(event)) + " · " + new Date(event.start * 1000).toISOString());
+  if (event.end != null) {
+    detail("終了", time(eventEnd(event)) + " · " + new Date(event.end * 1000).toISOString());
+    detail("経過時間", time(event.end - event.start) + " · " + timingLabels[event.timing]);
+  }
+  detail("モデル", event.model);
+  if (event.interrupted) detail("状態", "中断");
+  if (event.failed) detail("状態", "エラー");
+
+  if (event.tokens && Object.keys(event.tokens).length) detail("トークン", tokenParts(event.tokens).join(" / "));
+  if (event.cost != null) detail("ログに記録された金額", money(event.cost));
+  detail("元ログ", event.refs.map(recordRef).join(" · "));
+  if (rowNote(event)) panel.append(node("p", rowNote(event)));
+  panel.append(details);
+  if (data.include_content) {
+    for (const [key, label] of [["content", event.kind === "tool" ? "入力" : "内容"], ["command", "コマンド"], ["output", "出力"]]) {
+      if (event[key] != null) panel.append(node("h3", label), node("pre", stringify(event[key])));
+    }
+  }
+  for (const id of [event.tool_id, event.result_id]) {
+    if (byId.has(id)) panel.append(button(eventName(byId.get(id)), () => selectEvent(id, true)));
+  }
+  const related = data.findings.filter(finding => ["repeat", "gap"].includes(finding.kind) && finding.event_ids.includes(event.id));
+  for (const finding of related) {
+    const label = finding.kind === "repeat" ? "繰り返し候補 (" + finding.count + " 回)" : finding.label + " (" + time(finding.seconds) + ")";
+    panel.append(node("h3", label));
+    const group = node("div", null, "result-list");
+    for (const id of finding.event_ids) {
+      if (id !== event.id) group.append(button(eventName(byId.get(id)), () => selectEvent(id, true)));
+    }
+    panel.append(group);
+  }
+}
+function refresh() {
+  timedPage = 0;
+  untimedPage = 0;
+  renderAxis();
+  renderRows();
+  el("scroll").scrollTop = 0;
+}
+for (const [kind, label] of Object.entries(kinds)) {
+  const option = node("option", label);
+  option.value = kind;
+  el("filter").append(option);
+}
+el("zoom-in").onclick = () => zoom(0.5);
+el("zoom-out").onclick = () => zoom(2);
+el("fit").onclick = () => { setWindow(0, full); refresh(); };
+el("back").onclick = () => { setWindow(left - (right - left) / 2, right - left); refresh(); };
+el("forward").onclick = () => { setWindow(left + (right - left) / 2, right - left); refresh(); };
+el("filter").onchange = refresh;
+el("query").oninput = refresh;
+el("dismiss").onclick = () => {
+  document.querySelector(".inspector").hidden = true;
+  el("event-" + selection)?.focus();
+};
+function drawOverview() {
+  const lanes = [
+    ["ツール", e => ["tool","command","result"].includes(e.kind), "var(--tool)"],
+    ["モデル・推論", e => ["model","reasoning"].includes(e.kind), "var(--model)"],
+    ["会話・ターン", e => ["turn","assistant","user"].includes(e.kind), "var(--marker)"],
+    ["エラー", e => e.failed || e.kind === "error", "var(--error)"],
+  ];
+  el("overview-meta").textContent = [data.session.agent, time(elapsed) + (breaks.length ? "（ターン間を除く）" : ""), data.counts.events + " イベント"].join("　 /　");
+  for (const [label, matchesLane, color] of lanes) {
+    const lane = node("div", null, "lane");
+    const rail = node("div", null, "rail");
+    const bins = new Uint8Array(256);
+    for (const e of timed.filter(matchesLane)) {
+      const bin = n => Math.max(0, Math.min(255, Math.floor(n / full * 256)));
+      bins.fill(1, bin(eventStart(e)), bin(eventEnd(e)) + 1);
+    }
+    for (let i = 0; i < bins.length; i++) {
+      if (!bins[i]) continue;
+      const first = i;
+      while (bins[i + 1]) i++;
+      const mark = node("i");
+      mark.style.cssText = "left:" + first / 2.56 + "%;width:" + (i-first+1)/2.56 + "%;background:" + color;
+      rail.append(mark);
+    }
+    lane.append(node("span", label), rail);
+    el("overview").append(lane);
+  }
+}
+drawOverview();
+const checkpoints = [
+  ["最も長い処理", data.longest[0]],
+  ["エラーの記録", data.findings.find(f => f.kind === "error")],
+  ["同じ結果の反復", data.findings.find(f => f.kind === "repeat")],
+];
+for (const [label, finding] of checkpoints) {
+  if (!finding) continue;
+  const event = byId.get(finding.event_ids[0]);
+  const value = finding.seconds != null ? time(finding.seconds) : finding.count != null ? finding.count + "回" : data.counts.errors + "件";
+  el("key-insights").append(button(label + "　" + (finding.seconds != null ? (event.action || event.label) + "　" : "") + value, () => selectEvent(event.id, true)));
+}
+fillSummary();
+renderAxis();
+renderRows();
+const initialEvent = /^#event-(\d+)$/.exec(location.hash);
+if (initialEvent) selectEvent(Number(initialEvent[1]), true);
+})();
+</script>
+</body>
+</html>
