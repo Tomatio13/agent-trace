@@ -134,6 +134,253 @@ class TraceTests(unittest.TestCase):
         self.addCleanup(self.workspace.cleanup)
         self.root = Path(self.workspace.name)
 
+    def test_claude_diagnostics_and_delegated_tool_result(self):
+        def event(seconds, kind, **fields):
+            return {"timestamp": EPOCH + seconds, "type": kind, **fields}
+
+        records = [
+            event(0, "user", message={"content": "作業依頼"}),
+            event(
+                1,
+                "assistant",
+                message={
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "read",
+                            "name": "Read",
+                            "input": {
+                                "file_path": "README.md",
+                                "offset": 5,
+                                "limit": 10,
+                            },
+                        },
+                        {
+                            "type": "tool_use",
+                            "id": "agent",
+                            "name": "Agent",
+                            "input": {
+                                "description": "文書の確認",
+                                "subagent_type": "explorer",
+                                "prompt": "文書を確認して結果を教えて",
+                            },
+                        },
+                    ]
+                },
+            ),
+            event(
+                2,
+                "user",
+                message={
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "agent",
+                            "content": "完了",
+                        },
+                    ]
+                },
+                toolUseResult={
+                    "agentId": "child-a",
+                    "status": "completed",
+                    "totalDurationMs": 920,
+                    "content": [{"type": "text", "text": "確認済み。"}],
+                },
+            ),
+            event(
+                3,
+                "assistant",
+                isApiErrorMessage=True,
+                apiErrorStatus=429,
+                message={
+                    "model": "<synthetic>",
+                    "content": [{"type": "text", "text": "Rate limited"}],
+                },
+            ),
+            event(4, "system", subtype="compact_boundary"),
+            event(5, "system", subtype="turn_duration", durationMs=5000),
+            event(
+                6,
+                "user",
+                message={
+                    "content": (
+                        "<task-notification>\n<task-id>child-a</task-id>\n"
+                        "<tool-use-id>agent</tool-use-id>\n<status>completed</status>\n"
+                        "<summary>追加確認</summary>\n<result>追加の返答</result>\n</task-notification>"
+                    )
+                },
+            ),
+        ]
+        trace, report = load(
+            args(file=write_jsonl(self.root / "claude.jsonl", records))
+        )
+        events = public_events(trace, False, operations=True, messages=True)
+        self.assertEqual(report["counts"]["errors"], 1)
+        parsed = {entry["label"]: entry for entry in events}
+        error = parsed["モデルAPIエラー"]
+        self.assertEqual(
+            (error["api_status"], error["operation"]["error_output"]),
+            (429, "Rate limited"),
+        )
+        self.assertEqual(
+            parsed["Read"]["operation"]["read_range"], {"offset": 5, "limit": 10}
+        )
+        delegated = parsed["Agent"]["agent_activity"]
+        self.assertEqual(
+            (delegated["id"], delegated["description"], delegated["duration_ms"]),
+            ("child-a", "文書の確認", 920),
+        )
+        self.assertEqual(parsed["計測されたターン"]["start"], EPOCH)
+        self.assertEqual(parsed["コンテキストを圧縮"]["kind"], "compaction")
+        self.assertEqual(parsed["Agent"]["agent_request"], "文書を確認して結果を教えて")
+        self.assertEqual(parsed["Agent"]["agent_reply"], "確認済み。")
+        self.assertEqual(
+            parsed["サブエージェントからの通知"]["agent_reply"], "追加の返答"
+        )
+        self.assertNotIn(
+            "追加の返答", json.dumps(public_events(trace, False), ensure_ascii=False)
+        )
+
+    def test_codex_subagent_messages_merge_with_matching_activity_and_keep_sender(self):
+        def record(seconds, kind, payload, **fields):
+            return {
+                "timestamp": EPOCH + seconds,
+                "type": kind,
+                "payload": payload,
+                **fields,
+            }
+
+        envelope = (
+            "[3] assistant:agent\nMessage Type: FINAL_ANSWER\n"
+            "Task name: /root\nSender: /root/reader\nPayload:\n確認完了"
+        )
+        records = [
+            record(0, "session_meta", {"id": "sample"}),
+            record(1, "event_msg", {"type": "task_started", "turn_id": "turn"}),
+            record(
+                2,
+                "response_item",
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "name": "send_message",
+                    "call_id": "call",
+                    "arguments": json.dumps(
+                        {"target": "reader", "message": "読んでください"}
+                    ),
+                },
+            ),
+            record(
+                3,
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "turn_id": "turn",
+                    "item": {
+                        "type": "SubAgentActivity",
+                        "kind": "interacted",
+                        "agent_path": "/root/reader",
+                        "agent_thread_id": "child",
+                    },
+                },
+            ),
+            record(
+                4,
+                "response_item",
+                {"type": "function_call_output", "call_id": "call", "output": "sent"},
+            ),
+            record(
+                5,
+                "response_item",
+                {"type": "message", "role": "user", "content": [{"text": envelope}]},
+                metadata={"client_authored": False},
+            ),
+            record(
+                6,
+                "response_item",
+                {"type": "message", "role": "user", "content": [{"text": envelope}]},
+                metadata={"client_authored": True},
+            ),
+        ]
+        trace, _ = load(args(file=write_jsonl(self.root / "codex.jsonl", records)))
+        events = public_events(trace, False, messages=True, operations=True)
+        sent = next(event for event in events if event.get("agent_request"))
+        self.assertEqual(sent["agent_request"], "読んでください")
+        self.assertEqual(sent["agent_activity"]["id"], "child")
+        self.assertEqual(sent["refs"], [{"line": 3}, {"line": 4}, {"line": 5}])
+        incoming = [event for event in events if event["kind"] == "agent"]
+        self.assertEqual(len(incoming), 1)
+        self.assertEqual(incoming[0]["agent_reply"], "確認完了")
+        self.assertEqual(incoming[0]["agent_activity"]["name"], "/root/reader")
+        user = next(event for event in events if event["kind"] == "user")
+        self.assertEqual(user["message"], envelope)
+
+    def test_codex_records_mcp_status_turn_wait_compaction_and_agents(self):
+        def event(seconds, kind, **payload):
+            return {"timestamp": EPOCH + seconds, "type": kind, "payload": payload}
+
+        def item(seconds, started, item_type, **fields):
+            return event(
+                seconds,
+                "event_msg",
+                type="item_completed",
+                turn_id="turn",
+                started_at_ms=(EPOCH + started) * 1000,
+                completed_at_ms=(EPOCH + seconds) * 1000,
+                item={"type": item_type, **fields},
+            )
+
+        records = [
+            event(0, "session_meta", id="codex"),
+            event(1, "event_msg", type="task_started", turn_id="turn"),
+            item(
+                4,
+                2,
+                "McpToolCall",
+                server="demo",
+                tool="fetch",
+                status="failed",
+                result={
+                    "isError": True,
+                    "content": [{"type": "text", "text": "Service unavailable"}],
+                },
+            ),
+            item(5, 5, "SubAgentActivity", kind="started", agent_thread_id="agent"),
+            event(6, "compacted"),
+            item(6, 5, "ContextCompaction"),
+            item(8, 8, "SubAgentActivity", kind="completed", agent_thread_id="agent"),
+            event(
+                9,
+                "event_msg",
+                type="task_complete",
+                turn_id="turn",
+                time_to_first_token_ms=725,
+            ),
+            event(10, "event_msg", type="task_started", turn_id="aborted"),
+            event(
+                11,
+                "event_msg",
+                type="turn_aborted",
+                turn_id="aborted",
+                reason="interrupted",
+            ),
+        ]
+        trace, report = load(args(file=write_jsonl(self.root / "codex.jsonl", records)))
+        events = public_events(trace, False, operations=True)
+        self.assertEqual(report["counts"]["errors"], 1)
+        turns = [event for event in events if event["kind"] == "turn"]
+        self.assertEqual(turns[0]["first_token_ms"], 725)
+        self.assertTrue(turns[1]["interrupted"])
+        self.assertEqual(turns[1]["reason"], "interrupted")
+        mcp = next(event for event in events if event.get("server"))
+        self.assertEqual(mcp["operation"]["error_output"], "Service unavailable")
+        compactions = [event for event in events if event["kind"] == "compaction"]
+        self.assertEqual(len(compactions), 1)
+        self.assertEqual(len(compactions[0]["refs"]), 2)
+        agent = next(event for event in events if event["kind"] == "agent")
+        self.assertEqual(agent["agent_activity"]["status"], "completed")
+        self.assertEqual(agent["end"] - agent["start"], 3)
+
     def test_claude_slash_command_displays_name_and_preserves_markup_in_arguments(self):
         wrapper = (
             "<command-message>aidlc</command-message>\n"

@@ -279,8 +279,8 @@ button:disabled { cursor: default; opacity: .45; }
   background: var(--trace-conversation);
 }
 
-.mark[data-kind="tool"], .mark[data-kind="command"], .mark[data-kind="file_change"] { background: var(--trace-tool); }
-.mark[data-kind="model"], .mark[data-kind="reasoning"] { background: var(--trace-model); }
+.mark[data-kind="tool"], .mark[data-kind="command"], .mark[data-kind="file_change"], .mark[data-kind="agent"] { background: var(--trace-tool); }
+.mark[data-kind="model"], .mark[data-kind="reasoning"], .mark[data-kind="compaction"] { background: var(--trace-model); }
 .mark[data-kind="turn"] { background: transparent; border: 1px solid var(--trace-conversation); }
 .mark[data-failed="true"] { background: var(--trace-error); }
 .mark.point { height: 7px; width: 7px; border-radius: 1px; transform: translate(-50%, -50%) rotate(45deg); }
@@ -471,7 +471,21 @@ let untimedPage = 0;
 const kinds = {
   primary: "主な操作と要確認箇所", all: "すべてのイベント", turn: "ターン", user: "ユーザー入力", assistant: "応答",
   tool: "ツール", file_change: "ファイル操作", result: "ツール結果", model: "モデル", reasoning: "推論", command: "コマンド", error: "エラー",
+  compaction: "コンテキスト圧縮", agent: "サブエージェント",
 };
+const statusLabels = {
+  started: "開始", completed: "完了", failed: "失敗", declined: "拒否", interrupted: "中断",
+  interacted: "やり取り", async_launched: "バックグラウンドで開始", teammate_spawned: "チームに追加",
+};
+const stopReasonLabels = {end_turn: "応答完了", tool_use: "ツール呼び出し", max_tokens: "出力トークン上限", stop_sequence: "停止シーケンス"};
+function statusLabel(status) { return statusLabels[status] || status; }
+function readRangeText(range) {
+  if (!range) return null;
+  return [
+    range.offset == null ? null : "開始行 " + fmt.format(range.offset),
+    range.limit == null ? null : "最大 " + fmt.format(range.limit) + " 行",
+  ].filter(Boolean).join(" ／ ");
+}
 const changeLabels = {add: "追加", update: "編集", delete: "削除"};
 function fileTargets(operation) {
   if (!operation) return [];
@@ -545,8 +559,9 @@ function fillSummary() {
   if (data.include_content) limits.unshift("会話・ツール入出力を含む");
   else {
     if (data.events.some(e => e.operation)) limits.unshift("操作の詳細を含む");
-    if (data.events.some(e => e.message)) limits.unshift("会話本文を含む");
-    if (!data.events.some(e => e.operation || e.message)) limits.unshift("メタデータのみ");
+    const hasMessages = data.events.some(e => e.message || e.agent_request || e.agent_reply || e.questionnaire);
+    if (hasMessages) limits.unshift("会話本文を含む");
+    if (!hasMessages && !data.events.some(e => e.operation)) limits.unshift("メタデータのみ");
   }
   el("analysis-limits").textContent = (data.limitations || []).join(" ");
   el("analysis-limits").hidden = !el("analysis-limits").textContent;
@@ -635,8 +650,12 @@ function tokenLabel(event) {
 }
 function rowNote(event) {
   const parts = [...(notes.get(event.id) || [])];
-  if (event.failed || event.kind === "error") parts.unshift(event.exit_code != null ? "終了コード " + event.exit_code + "。実行結果を確認" : "エラーが記録された");
+  if (event.api_status != null) parts.unshift("HTTP " + event.api_status);
+  else if (event.failed || event.kind === "error") parts.unshift(event.exit_code != null ? "終了コード " + event.exit_code + "。実行結果を確認" : statusLabel(event.status) || "エラーが記録された");
   else if (event.kind === "command" && event.exit_code === 0) parts.unshift("正常終了");
+  if (event.interrupted) parts.unshift(event.reason ? "中断 ／ " + statusLabel(event.reason) : "中断");
+  if (event.stop_reason === "max_tokens") parts.push("出力トークン上限に到達");
+  if (event.agent_activity?.status) parts.push(statusLabel(event.agent_activity.status));
   return parts.join(" ／ ");
 }
 const hasCommands = data.events.some(event => event.kind === "command");
@@ -646,12 +665,14 @@ function matches(event) {
   const failed = event.kind === "error" || event.failed;
   if (filter === "primary") {
     if (hasCommands && !failed && !notes.has(event.id) && event.action === "ツールを呼び出す") return false;
-    if (!failed && !notes.has(event.id) && !["tool","command","file_change","user","assistant","turn"].includes(event.kind)) return false;
+    if (!failed && !notes.has(event.id) && event.stop_reason !== "max_tokens" && !["tool","command","file_change","user","assistant","turn","compaction","agent"].includes(event.kind)) return false;
   } else if (filter === "file_change") {
     if (event.kind !== "file_change" && !event.operation?.file_operation) return false;
+  } else if (filter === "agent") {
+    if (event.kind !== "agent" && !event.agent_activity) return false;
   } else if (filter !== "all" && !(filter === "error" ? failed : filter === event.kind)) return false;
   if (!q) return true;
-  return [eventName(event), event.label, event.model, event.message, event.questionnaire, event.content, event.command, event.output, ...fileTargets(event.operation)]
+  return [eventName(event), event.label, event.server, event.model, event.reason, event.agent_activity, event.message, event.agent_request, event.agent_reply, event.questionnaire, event.content, event.command, event.output, ...fileTargets(event.operation)]
     .some(value => value != null && stringify(value).toLowerCase().includes(q));
 }
 function renderRow(event) {
@@ -665,13 +686,17 @@ function renderRow(event) {
   const title = node("span", null, "row-label");
   const description = node("span", null, "row-description");
   description.append(node("span", event.action || event.label, "row-name"));
-  const preview = event.message || event.questionnaire?.items.map(item => item.question).join(" ／ ");
+  const agent = event.agent_activity;
+  const preview = event.message || event.agent_request || event.agent_reply || event.questionnaire?.items.map(item => item.question).join(" ／ ")
+    || [agent?.name || agent?.type, agent?.description, event.server].filter(Boolean).join(" ／ ");
   if (preview) description.append(node("span", preview, "message-preview"));
   const files = fileTargets(event.operation);
   if (files.length) {
     const more = files.length > 2 ? " ／ ほか " + (files.length - 2) + " 件" : "";
     description.append(node("span", files.slice(0, 2).join(" ／ ") + more, "message-preview file-preview"));
   }
+  const range = readRangeText(event.operation?.read_range);
+  if (range) description.append(node("small", range, "row-note"));
   const note = rowNote(event);
   if (note) description.append(node("small", note, "row-note"));
   title.append(description);
@@ -735,7 +760,7 @@ function renderRows(jump = false) {
     });
     item.id = "event-" + event.id;
     item.setAttribute("aria-current", selection === event.id);
-    const preview = event.message || event.questionnaire?.items.map(item => item.question).join(" ／ ");
+    const preview = event.message || event.agent_request || event.agent_reply || event.questionnaire?.items.map(item => item.question).join(" ／ ");
     if (preview) item.append(node("span", preview, "message-preview"));
     const files = fileTargets(event.operation);
     if (files.length) item.append(node("span", files[0], "message-preview file-preview"));
@@ -772,6 +797,8 @@ function renderInspector(event) {
   const panel = el("inspector");
   panel.replaceChildren(node("h3", eventName(event)));
   if (event.message) panel.append(node("p", event.message, "message-body"));
+  if (event.agent_request) panel.append(node("h3", "送ったメッセージ"), node("p", event.agent_request, "message-body"));
+  if (event.agent_reply) panel.append(node("h3", "サブエージェントからの返答"), node("p", event.agent_reply, "message-body"));
   if (event.questionnaire) {
     for (const item of event.questionnaire.items) {
       panel.append(node("h3", "質問"), node("p", item.question, "message-body"));
@@ -807,14 +834,39 @@ function renderInspector(event) {
   }
   detail("種別", kinds[event.kind]);
   if (event.kind === "tool") detail("ツール名", event.label);
+  detail("MCPサーバー", event.server);
+  detail("読み取り範囲", readRangeText(op.read_range));
   detail("開始", event.start == null ? "不明" : time(eventStart(event)) + " · " + new Date(event.start * 1000).toISOString());
   if (event.end != null) {
     detail("終了", time(eventEnd(event)) + " · " + new Date(event.end * 1000).toISOString());
     detail("経過時間", time(event.end - event.start) + " · " + timingLabels[event.timing]);
   }
   detail("モデル", event.model);
-  if (event.interrupted) detail("状態", "中断");
-  if (event.failed) detail("状態", "エラー");
+  if (event.first_token_ms != null) detail("最初のトークンまで", time(event.first_token_ms / 1000));
+  if (event.interrupted || event.failed || event.status) {
+    detail("状態", event.interrupted ? "中断" : statusLabel(event.status) || "エラー");
+  }
+  if (event.api_status != null) detail("HTTPステータス", event.api_status);
+  detail(event.interrupted ? "中断理由" : "エラー種別", statusLabel(event.reason));
+  if (event.stop_reason) detail("応答の停止理由", stopReasonLabels[event.stop_reason] || event.stop_reason);
+
+  const agent = event.agent_activity;
+  if (agent) {
+    detail("サブエージェント", [agent.name, agent.type, agent.id].filter(Boolean).join(" ／ ") || null);
+    detail("宛先", agent.recipient);
+    detail("委任内容", agent.description);
+    detail("エージェントの状態", statusLabel(agent.status));
+    detail("操作", agent.action);
+    detail("子エージェントのモデル", agent.model);
+    detail("推論設定", agent.effort);
+    if (agent.background != null) detail("実行方式", agent.background ? "バックグラウンド" : "同期");
+    if (agent.duration_ms != null) detail("子エージェントの所要時間", time(agent.duration_ms / 1000));
+    if (agent.tokens != null) detail("子エージェントのトークン", fmt.format(agent.tokens));
+    if (agent.targets?.length) detail("対象エージェントID", agent.targets.join(" ／ "));
+    for (const [target, status] of Object.entries(agent.states || {})) {
+      detail("対象エージェントの状態", target + " ／ " + statusLabel(status));
+    }
+  }
 
   if (event.tokens && Object.keys(event.tokens).length) detail("トークン", tokenParts(event.tokens).join(" / "));
   if (event.cost != null) detail("ログに記録された金額", money(event.cost));
@@ -870,8 +922,8 @@ el("dismiss").onclick = () => {
 };
 function drawOverview() {
   const lanes = [
-    ["ツール", e => ["tool","command","file_change","result"].includes(e.kind), "var(--trace-tool)"],
-    ["モデル・推論", e => ["model","reasoning"].includes(e.kind), "var(--trace-model)"],
+    ["ツール", e => ["tool","command","file_change","result","agent"].includes(e.kind), "var(--trace-tool)"],
+    ["モデル・推論", e => ["model","reasoning","compaction"].includes(e.kind), "var(--trace-model)"],
     ["会話・ターン", e => ["turn","assistant","user"].includes(e.kind), "var(--trace-conversation)"],
     ["エラー", e => e.failed || e.kind === "error", "var(--trace-error)"],
   ];

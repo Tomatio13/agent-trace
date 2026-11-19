@@ -408,6 +408,8 @@ CODEX_TOKENS = {
 def claude_trace(trace, records):
     generations = {}
     turn = None
+    agent_calls = set()
+    agent_ids = set()
     for line, record in records:
         ref = {"line": line}
         at = timestamp(record.get("timestamp"))
@@ -428,7 +430,26 @@ def claude_trace(trace, records):
                 "models": model_costs,
             }
         if kind not in ("user", "assistant"):
-            if kind == "system" and record.get("level") == "error":
+            subtype = record.get("subtype")
+            duration_ms = number(record.get("durationMs"))
+            if (
+                kind == "system"
+                and subtype == "turn_duration"
+                and at is not None
+                and duration_ms is not None
+            ):
+                trace.add(
+                    "turn",
+                    "計測されたターン",
+                    at - duration_ms / 1000,
+                    ref,
+                    end=at,
+                    timing="turn",
+                    turn=turn,
+                )
+            elif kind == "system" and subtype == "compact_boundary":
+                trace.add("compaction", "コンテキストを圧縮", at, ref, turn=turn)
+            elif kind == "system" and record.get("level") == "error":
                 trace.add(
                     "error",
                     "システムエラー",
@@ -441,8 +462,46 @@ def claude_trace(trace, records):
         blocks = msg.get("content", record.get("content", []))
         if isinstance(blocks, str):
             blocks = [{"type": "text", "text": blocks}]
+        if kind == "assistant" and record.get("isApiErrorMessage"):
+            error_text = "\n".join(
+                block["text"]
+                for block in (
+                    obj(block) for block in (blocks if isinstance(blocks, list) else [])
+                )
+                if block.get("type") == "text" and isinstance(block.get("text"), str)
+            )
+            trace.add(
+                "error",
+                "モデルAPIエラー",
+                at,
+                ref,
+                turn=turn,
+                api_status=number(record.get("apiErrorStatus")),
+                reason=record.get("error"),
+                content=error_text or record.get("error"),
+            )
+            continue
         if not isinstance(blocks, list):
             continue
+        if kind == "user":
+            remaining = []
+            for block in blocks:
+                text = obj(block).get("text")
+                notice = claude_agent_notice(text, agent_calls, agent_ids)
+                if notice:
+                    activity, reply = notice
+                    trace.add(
+                        "agent",
+                        "サブエージェントからの通知",
+                        at,
+                        ref,
+                        turn=turn,
+                        agent_activity=activity,
+                        agent_reply=reply,
+                    )
+                else:
+                    remaining.append(block)
+            blocks = remaining
         if (
             kind == "user"
             and any(obj(b).get("type") == "text" for b in blocks)
@@ -469,6 +528,8 @@ def claude_trace(trace, records):
             elif usage:
                 event["tokens"].update(usage)
                 event["refs"].append(ref)
+            if msg.get("stop_reason"):
+                event["stop_reason"] = msg["stop_reason"]
         for block in blocks:
             block = obj(block)
             block_type = block.get("type")
@@ -487,17 +548,32 @@ def claude_trace(trace, records):
             elif block_type == "thinking":
                 trace.add("reasoning", "推論イベント", at, ref, turn=turn)
             elif block_type == "tool_use":
+                name = block.get("name") or "ツール"
+                inputs = block.get("input")
+                is_agent = name.lower() in ("agent", "task")
+                if is_agent and isinstance(block.get("id"), str):
+                    agent_calls.add(block["id"])
                 trace.add(
                     "tool",
-                    block.get("name") or "ツール",
+                    name,
                     at,
                     ref,
                     turn=turn,
                     call=block.get("id"),
-                    content=block.get("input"),
+                    content=inputs,
+                    agent_activity=claude_agent_details(obj(inputs))
+                    if is_agent
+                    else None,
+                    agent_request=plain_text(obj(inputs).get("prompt"))
+                    if is_agent
+                    else None,
                 )
             elif block_type == "tool_result":
                 failed = bool(block.get("is_error"))
+                result = obj(record.get("toolUseResult"))
+                agent_id = result.get("agentId")
+                if isinstance(agent_id, str):
+                    agent_ids.add(agent_id)
                 trace.add(
                     "result",
                     "ツール結果",
@@ -507,8 +583,161 @@ def claude_trace(trace, records):
                     call=block.get("tool_use_id"),
                     failed=failed,
                     content=block.get("content"),
-                    answers=obj(record.get("toolUseResult")).get("answers"),
+                    answers=result.get("answers"),
+                    agent_activity=claude_agent_details(result, result=True),
+                    agent_reply=plain_text(
+                        result.get("content") or block.get("content")
+                    )
+                    if agent_id and result.get("status") == "completed" and not failed
+                    else None,
                 )
+
+
+def plain_text(content):
+    if isinstance(content, list):
+        content = "\n".join(
+            block["text"]
+            for block in (obj(block) for block in content)
+            if block.get("type") == "text" and isinstance(block.get("text"), str)
+        )
+    return content if isinstance(content, str) and content.strip() else None
+
+
+def claude_agent_notice(text, calls, agent_ids):
+    if not isinstance(text, str):
+        return None
+    envelope = re.fullmatch(
+        r"\s*<task-notification>(.*)</task-notification>\s*", text, re.DOTALL
+    )
+    if not envelope:
+        return None
+
+    def field(name):
+        match = re.search(rf"<{name}>(.*?)</{name}>", envelope[1], re.DOTALL)
+        return match[1].strip() if match else None
+
+    identifier = field("task-id")
+    if field("tool-use-id") not in calls and identifier not in agent_ids:
+        return None
+    return {
+        "id": identifier,
+        "status": field("status"),
+        "description": field("summary"),
+    }, field("result")
+
+
+def codex_agent_reply(text):
+    envelope = re.fullmatch(
+        r"\s*(?:\[\d+\] assistant:[^\r\n]+\s*\n)?"
+        r"Message Type: (?P<type>MESSAGE|FINAL_ANSWER)\s*\n"
+        r"Task name: (?P<target>/\S+)\s*\nSender: (?P<sender>/\S+)\s*\n"
+        r"Payload:\s*\n(?P<text>.+)",
+        text,
+        re.DOTALL,
+    )
+    if not envelope:
+        return None
+    return {
+        "name": envelope["sender"],
+        "recipient": envelope["target"],
+        "status": "completed" if envelope["type"] == "FINAL_ANSWER" else "interacted",
+    }, envelope["text"]
+
+
+def claude_agent_details(info, *, result=False):
+    if result and not info.get("agentId"):
+        return None
+    details = {
+        "id": info.get("agentId"),
+        "name": info.get("name"),
+        "type": info.get("subagent_type")
+        or info.get("agentType")
+        or info.get("agent_type"),
+        "description": info.get("description"),
+        "status": info.get("status"),
+        "model": info.get("resolvedModel"),
+        "background": info.get("run_in_background"),
+        "duration_ms": number(info.get("totalDurationMs")),
+        "tokens": number(info.get("totalTokens")),
+    }
+    if result and info.get("isAsync") is True:
+        details["background"] = True
+    return {key: value for key, value in details.items() if value is not None}
+
+
+def codex_agent_event(trace, item, turn, ref, started, completed, at, active_agents):
+    if item["type"] == "CollabAgentToolCall":
+        operation = item.get("tool")
+        raw_targets = item.get("receiver_thread_ids")
+        targets = (
+            [target for target in raw_targets if isinstance(target, str)]
+            if isinstance(raw_targets, list)
+            else []
+        )
+        statuses = {}
+        for target, state in obj(item.get("agents_states")).items():
+            status = obj(state).get("status")
+            if isinstance(status, str):
+                statuses[target] = status
+        trace.add(
+            "agent",
+            "サブエージェントの完了待ち"
+            if operation == "wait"
+            else "サブエージェントを操作",
+            started or completed or at,
+            ref,
+            end=completed if started else None,
+            timing="recorded",
+            turn=turn,
+            failed=item.get("status") == "failed",
+            agent_activity={
+                "action": operation,
+                "status": item.get("status"),
+                "targets": targets,
+                "states": statuses,
+            },
+        )
+        return
+    agent_id = item.get("agent_thread_id")
+    phase = item.get("kind")
+    activity = {
+        "id": agent_id,
+        "name": item.get("agent_path"),
+        "status": phase,
+        "model": item.get("model"),
+        "effort": item.get("reasoning_effort"),
+    }
+    if phase == "completed" and isinstance(agent_id, str) and agent_id in active_agents:
+        previous = active_agents.pop(agent_id)
+        end = completed or at
+        if (
+            previous["start"] is not None
+            and end is not None
+            and end >= previous["start"]
+        ):
+            previous.update(end=end, timing="recorded", label="サブエージェントの実行")
+            previous["agent_activity"].update(
+                {k: v for k, v in activity.items() if v is not None}
+            )
+            previous["refs"].append(ref)
+            return
+    labels = {
+        "started": "サブエージェントを開始",
+        "completed": "サブエージェントが完了",
+        "interacted": "サブエージェントとのやり取り",
+    }
+    event = trace.add(
+        "agent",
+        labels.get(phase, "サブエージェントの活動"),
+        started or completed or at,
+        ref,
+        end=completed if started else None,
+        timing="recorded",
+        turn=turn,
+        agent_activity=activity,
+    )
+    if phase == "started" and isinstance(agent_id, str):
+        active_agents[agent_id] = event
 
 
 def codex_trace(trace, records):
@@ -519,6 +748,9 @@ def codex_trace(trace, records):
     legacy_usage = []
     legacy_messages = []
     response_messages = set()
+    compactions = {}
+    active_agents = {}
+    pending_agent_sends = {}
     turn = None
     explicit_turn = False
     for line, record in records:
@@ -529,7 +761,15 @@ def codex_trace(trace, records):
         sub = payload.get("type")
         if kind == "session_meta":
             continue
-        if kind == "turn_context":
+        if kind == "compacted":
+            compactions[turn] = trace.add(
+                "compaction",
+                "コンテキストを圧縮",
+                at,
+                ref,
+                turn=turn,
+            )
+        elif kind == "turn_context":
             if key := payload.get("turn_id"):
                 turn = key
                 explicit_turn = True
@@ -558,7 +798,21 @@ def codex_trace(trace, records):
                 )
             elif sub in ("task_complete", "turn_completed", "turn_aborted"):
                 event = turns.get(key)
+                interrupted = sub == "turn_aborted"
+                if event is None and interrupted:
+                    event = trace.add(
+                        "turn",
+                        "ターン",
+                        timestamp(payload.get("started_at")) or at,
+                        ref,
+                        turn=key,
+                    )
                 if event is not None:
+                    event.update(
+                        interrupted=interrupted,
+                        reason=payload.get("reason") if interrupted else None,
+                        first_token_ms=number(payload.get("time_to_first_token_ms")),
+                    )
                     end = timestamp(payload.get("completed_at")) or at
                     if (
                         end is not None
@@ -569,9 +823,9 @@ def codex_trace(trace, records):
                             end=end,
                             timing="turn",
                             failed=False,
-                            interrupted=sub == "turn_aborted",
                         )
-                    event["refs"].append(ref)
+                    if event["refs"][-1] != ref:
+                        event["refs"].append(ref)
                 if key == turn:
                     turn = None
                     explicit_turn = False
@@ -620,6 +874,74 @@ def codex_trace(trace, records):
                         output=item.get("stderr") or item.get("stdout"),
                         failed=item.get("status") in ("failed", "declined"),
                     )
+                elif item_type == "McpToolCall":
+                    name = item.get("tool") or "MCPツール"
+                    status = item.get("status")
+                    result = item.get("result")
+                    trace.add(
+                        "tool",
+                        name,
+                        started or completed or at,
+                        ref,
+                        end=completed if started else None,
+                        timing="recorded",
+                        turn=key,
+                        content=decoded(item.get("arguments")),
+                        output=result,
+                        server=item.get("server"),
+                        status=status,
+                        failed=status in ("failed", "declined")
+                        or obj(result).get("isError") is True,
+                    )
+                elif item_type == "ContextCompaction":
+                    compaction = compactions.pop(key, None)
+                    if compaction is None:
+                        trace.add(
+                            "compaction",
+                            "コンテキストを圧縮",
+                            started or completed or at,
+                            ref,
+                            end=completed if started else None,
+                            timing="recorded",
+                            turn=key,
+                        )
+                    else:
+                        compaction["refs"].append(ref)
+                        if (
+                            started is not None
+                            and completed is not None
+                            and completed >= started
+                        ):
+                            compaction.update(
+                                start=started, end=completed, timing="recorded"
+                            )
+                elif item_type in ("SubAgentActivity", "CollabAgentToolCall"):
+                    if (
+                        item_type == "SubAgentActivity"
+                        and item.get("kind") == "interacted"
+                    ):
+                        name = item.get("agent_path")
+                        identifier = item.get("agent_thread_id")
+                        sends = []
+                        for candidate in pending_agent_sends.values():
+                            target = candidate["agent_activity"].get("recipient")
+                            if not target or candidate.get("turn") != key:
+                                continue
+                            if target in (name, identifier) or (
+                                isinstance(name, str)
+                                and not target.startswith("/")
+                                and name.endswith("/" + target)
+                            ):
+                                sends.append(candidate)
+                        if len(sends) == 1:
+                            sends[0]["agent_activity"].update(
+                                name=name, id=identifier, model=item.get("model")
+                            )
+                            sends[0]["refs"].append(ref)
+                            continue
+                    codex_agent_event(
+                        trace, item, key, ref, started, completed, at, active_agents
+                    )
                 elif item_type == "Reasoning" and started and completed:
                     trace.add(
                         "reasoning",
@@ -656,18 +978,44 @@ def codex_trace(trace, records):
         elif kind == "response_item":
             if sub == "message" and payload.get("role") in ("user", "assistant"):
                 role = payload["role"]
+                parts = payload.get("content")
+                texts = (
+                    [
+                        obj(part)["text"]
+                        for part in parts
+                        if isinstance(obj(part).get("text"), str)
+                    ]
+                    if isinstance(parts, list)
+                    else [parts]
+                )
+                if (
+                    role == "user"
+                    and obj(record.get("metadata")).get("client_authored") is False
+                ):
+                    remaining = []
+                    for text in texts:
+                        received = (
+                            codex_agent_reply(text) if isinstance(text, str) else None
+                        )
+                        if received:
+                            activity, reply = received
+                            trace.add(
+                                "agent",
+                                "サブエージェントからの返信",
+                                at,
+                                ref,
+                                turn=turn,
+                                agent_activity=activity,
+                                agent_reply=reply,
+                            )
+                        else:
+                            remaining.append(text)
+                    if not remaining:
+                        continue
+                    texts = remaining
                 if role == "user" and not explicit_turn:
                     turn = f"line-{line}"
-                parts = payload.get("content")
-                content = (
-                    "\n".join(
-                        obj(p).get("text", "")
-                        for p in parts
-                        if isinstance(obj(p).get("text"), str)
-                    )
-                    if isinstance(parts, list)
-                    else parts
-                )
+                content = "\n".join(text for text in texts if isinstance(text, str))
                 synthetic = (
                     role == "user"
                     and isinstance(content, str)
@@ -706,21 +1054,44 @@ def codex_trace(trace, records):
                 args = payload.get(
                     "arguments", payload.get("input", payload.get("action"))
                 )
-                trace.add(
+                inputs = decoded(args)
+                name = payload.get("name")
+                agent_request = None
+                activity = None
+                if name in (
+                    "spawn_agent",
+                    "followup_task",
+                    "send_message",
+                    "send_input",
+                ) and payload.get("namespace") in (None, "collaboration"):
+                    agent_request = plain_text(obj(inputs).get("message"))
+                    target = obj(inputs).get("target") or obj(inputs).get("task_name")
+                    activity = {
+                        "action": name,
+                        "recipient": target if isinstance(target, str) else None,
+                        "type": obj(inputs).get("agent_type"),
+                    }
+                event = trace.add(
                     "tool",
-                    payload.get("name")
-                    or ("web_search" if sub == "web_search_call" else "ツール"),
+                    name or ("web_search" if sub == "web_search_call" else "ツール"),
                     at,
                     ref,
                     turn=turn,
                     call=payload.get("call_id"),
-                    content=decoded(args),
+                    content=inputs,
+                    agent_request=agent_request,
+                    agent_activity=activity,
                 )
+                if agent_request and isinstance(event.get("call"), str):
+                    pending_agent_sends[event["call"]] = event
             elif sub in (
                 "function_call_output",
                 "custom_tool_call_output",
                 "tool_result",
             ):
+                call_id = payload.get("call_id")
+                if isinstance(call_id, str):
+                    pending_agent_sends.pop(call_id, None)
                 output = payload.get("output")
                 out = obj(decoded(output))
                 exit_code = out.get("exit_code")
@@ -1012,6 +1383,13 @@ def pair_tools(trace):
             exit_code=event.get("exit_code"),
             result_id=event["id"],
         )
+        if event.get("agent_activity"):
+            start["agent_activity"] = {
+                **(start.get("agent_activity") or {}),
+                **event["agent_activity"],
+            }
+        if event.get("agent_reply"):
+            start["agent_reply"] = event["agent_reply"]
         start["refs"].extend(event["refs"])
         event["tool_id"] = start["id"]
         event["label"] = f"{start['label']} の結果"
@@ -1414,6 +1792,14 @@ def action_name(event):
         return command_action(event.get("command")) or "シェルコマンドを実行"
     if kind == "tool":
         name = event["label"].lower().split(".")[-1]
+        if name in ("agent", "task") and event.get("agent_activity") is not None:
+            return "サブエージェントに委任"
+        if event.get("agent_request") and event.get("agent_activity"):
+            return (
+                "サブエージェントへの依頼"
+                if name == "spawn_agent"
+                else "サブエージェントとのやり取り"
+            )
         if name in ("bash", "exec_command"):
             args = obj(event.get("content"))
             return (
@@ -1448,6 +1834,12 @@ PUBLIC_EVENT_FIELDS = {
     "cost",
     "result_id",
     "tool_id",
+    "api_status",
+    "first_token_ms",
+    "reason",
+    "stop_reason",
+    "server",
+    "status",
 }
 
 
@@ -1510,11 +1902,28 @@ def operation_details(event):
         "command": command,
         "cwd": event.get("cwd") or args.get("workdir") or args.get("cwd"),
     }
+    if tool == "read":
+        read_range = {
+            key: value
+            for key in ("offset", "limit")
+            if (value := number(args.get(key))) is not None
+        }
+        if read_range:
+            details["read_range"] = read_range
     if event.get("failed") or kind == "error":
         output = event.get("output")
         if output is None and kind != "tool":
             output = event.get("content")
         if output is not None:
+            if event.get("server") and isinstance(obj(output).get("content"), list):
+                texts = [
+                    block["text"]
+                    for block in (obj(block) for block in output["content"])
+                    if block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                ]
+                if texts:
+                    output = "\n".join(texts)
             message = (
                 output
                 if isinstance(output, str)
@@ -1565,6 +1974,12 @@ def public_events(trace, include_content, *, operations=False, messages=False):
             public["token_count"] = count
         if operations and (details := operation_details(event)):
             public["operation"] = details
+        if operations and event.get("agent_activity"):
+            public["agent_activity"] = event["agent_activity"]
+        if messages or include_content:
+            for field in ("agent_request", "agent_reply"):
+                if event.get(field):
+                    public[field] = event[field]
         content = event.get("content")
         if (
             (messages or include_content)
